@@ -143,6 +143,7 @@ class Config:
     mkt_dd_threshold = -0.05   # Only scan 3-5% when market drawdown < -5%
     pos_low_pct = 0.05         # Flat position for 3-5% signals
     circuit_breaker_pct = -0.03  # Stop opening new positions if daily PnL < -3%
+    vol_targeting = True         # Scale positions inversely with market vol
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
