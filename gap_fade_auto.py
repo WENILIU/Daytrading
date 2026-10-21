@@ -136,6 +136,7 @@ class Config:
     max_daily_positions = 15
     max_daily_exposure = 0.75  # 5% signals cap
     max_total_exposure = 1.50  # Total cap including 3-5% signals (requires margin)
+    min_score_threshold = 1    # Skip signals with score < this (low quality)
 
     # --- 3-5% Gap Module (activates only during market drawdown) ---
     gap_threshold_low = 0.03   # Lower gap threshold
@@ -827,6 +828,10 @@ class GapFadeAutoTrader:
                 sig.tier = f"LOW{int(pos_pct*100)}%"
             else:
                 pos_pct = self._calc_position_score(sig)
+                # Skip low-quality signals
+                if pos_pct <= self.config.pos_min_pct and getattr(sig, '_score', 0) < self.config.min_score_threshold:
+                    self.log.info(f"  {sig.symbol}: score={getattr(sig, '_score', 0)} < {self.config.min_score_threshold}, SKIP")
+                    continue
                 sig.tier = f"B{int(pos_pct*100)}%"
             sig.tier_multiplier = pos_pct / 0.05  # Normalize for logging
 
