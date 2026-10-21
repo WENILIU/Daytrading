@@ -1,0 +1,21 @@
+-----------------------------------------------------------------
+[23300] 2026/10/20 09:00:22.261 OnSessionConnect¡ACode: 3001, Error Code:0.
+[23300] 2026/10/20 09:00:37.296 -----------------------------------------------------------------
+[18672] 2026/10/20 09:00:43.218 OnSessionConnect¡ACode: 3001, Error Code:0.
+[18672] 2026/10/20 09:00:58.249 -----------------------------------------------------------------
+[20096] 2026/10/20 09:03:40.443 OnSessionConnect¡ACode: 3001, Error Code:0.
+[20096] 2026/10/20 09:04:30.496 -----------------------------------------------------------------
+[24600] 2026/10/20 09:05:36.979 OnSessionConnect¡ACode: 3001, Error Code:0.
+[24600] 2026/10/20 09:06:18.122 -----------------------------------------------------------------
+[10592] 2026/10/20 09:07:12.346 OnSessionConnect¡ACode: 3001, Error Code:0.
+[4372] 2026/10/20 09:07:49.429 OnSessionConnect¡ACode: 3001, Error Code:0.
+[15768] 2026/10/20 09:47:16.128 OnSessionConnect¡ACode: 3001, Error Code:0.
+[15768] 2026/10/20 09:47:36.358 -----------------------------------------------------------------
+[11660] 2026/10/20 09:48:11.527 OnSessionConnect¡ACode: 3001, Error Code:0.
+[5480] 2026/10/20 09:48:51.548 OnSessionConnect¡ACode: 3001, Error Code:0.
+[20060] 2026/10/20 09:49:30.443 OnSessionConnect¡ACode: 3001, Error Code:0.
+[8928] 2026/10/20 10:02:07.926 OnSessionConnect¡ACode: 3001, Error Code:0.
+[20436] 2026/10/20 10:02:41.335 OnSessionConnect¡ACode: 3001, Error Code:0.
+[11660] 2026/10/20 10:35:15.965 OnSessionDisconnect¡ACode: 3033, Error code: 0
+[11660] 2026/10/20 10:35:15.966 Solace QuoteServer Disconnect:Session down(1); subCode: SOLCLIENT_SUBCODE_COMMUNICATION_ERROR(14),response code: 0, reason:TCP: Could not read from socket 2904, error = Connection reset by peer (10054)
+[11660] 2026/10/20 10:35:15.967 Solace QuoteServer Disconnect_SESSION_EVENT_DOWN_ERROR

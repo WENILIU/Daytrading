@@ -1,0 +1,181 @@
+2026-10-18 22:09:50,196 [INFO] ============================================================
+2026-10-18 22:09:50,196 [INFO] GAP FADE v3 AUTO TRADER
+2026-10-18 22:09:50,196 [INFO] Capital: 4,500,000
+2026-10-18 22:09:50,196 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:09:50,196 [INFO] Time: 2026-10-18T22:09:50.196845
+2026-10-18 22:09:50,196 [INFO] SIMULATION MODE - No real orders
+2026-10-18 22:09:50,454 [INFO] ============================================================
+2026-10-18 22:09:50,455 [INFO] STEP 1: Scanning signals...
+2026-10-18 22:09:50,456 [INFO]   Market gap: +0.00%
+2026-10-18 22:09:51,033 [INFO]   Found 0 signals:
+2026-10-18 22:09:51,033 [INFO] No signals. Done.
+2026-10-18 22:34:51,101 [INFO] ============================================================
+2026-10-18 22:34:51,101 [INFO] GAP FADE v3 AUTO TRADER
+2026-10-18 22:34:51,101 [INFO] Capital: 4,500,000
+2026-10-18 22:34:51,101 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:34:51,102 [INFO] Time: 2026-10-18T22:34:51.102007
+2026-10-18 22:34:51,102 [INFO] Connecting to Yuanta Securities...
+2026-10-18 22:34:51,503 [ERROR] FATAL: login validation error: invalid secret_key (base58 decode failed): provided string contained invalid character 'O' at byte 1
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 550, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 160, in connect
+    self.api.login(
+    ~~~~~~~~~~~~~~^
+        api_key=self.config.api_key,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        secret_key=self.config.secret_key
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+shioaji.ShioajiValueError: login validation error: invalid secret_key (base58 decode failed): provided string contained invalid character 'O' at byte 1
+2026-10-18 22:51:08,417 [INFO] ============================================================
+2026-10-18 22:51:08,418 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 22:51:08,418 [INFO] Capital: 4,500,000
+2026-10-18 22:51:08,418 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:51:08,418 [INFO] Time: 2026-10-18T22:51:08.418752
+2026-10-18 22:51:08,418 [INFO] SIMULATION MODE - No real orders
+2026-10-18 22:51:08,538 [INFO] ============================================================
+2026-10-18 22:51:08,539 [INFO] STEP 1: Scanning signals...
+2026-10-18 22:51:08,539 [INFO]   Market gap: +0.00%
+2026-10-18 22:51:08,989 [INFO]   Found 0 signals:
+2026-10-18 22:51:08,990 [INFO] No signals. Done.
+2026-10-18 22:52:41,636 [INFO] ============================================================
+2026-10-18 22:52:41,636 [INFO] GAP FADE v3 NOW MODE (immediate, no time wait)
+2026-10-18 22:52:41,637 [INFO] Capital: 4,500,000
+2026-10-18 22:52:41,637 [INFO] Time: 2026-10-18T22:52:41.637093
+2026-10-18 22:52:41,637 [INFO] SIMULATION MODE - No real orders
+2026-10-18 22:52:41,786 [INFO] ============================================================
+2026-10-18 22:52:41,786 [INFO] STEP 1: Scanning signals...
+2026-10-18 22:52:41,786 [INFO]   Market gap: +0.00%
+2026-10-18 22:52:42,150 [INFO]   Found 0 signals:
+2026-10-18 22:52:42,151 [INFO] No signals right now. Done.
+2026-10-18 22:53:41,864 [INFO] ============================================================
+2026-10-18 22:53:41,865 [INFO] GAP FADE v3 NOW MODE (immediate, no time wait)
+2026-10-18 22:53:41,865 [INFO] Capital: 4,500,000
+2026-10-18 22:53:41,867 [INFO] Time: 2026-10-18T22:53:41.867056
+2026-10-18 22:53:41,867 [INFO] SIMULATION MODE - No real orders
+2026-10-18 22:53:41,979 [INFO] ============================================================
+2026-10-18 22:53:41,979 [INFO] STEP 1: Scanning signals...
+2026-10-18 22:53:41,980 [INFO]   Market gap: +0.00%
+2026-10-18 22:53:42,280 [INFO]   Found 0 signals:
+2026-10-18 22:53:42,281 [INFO] No signals right now. Done.
+2026-10-18 22:53:55,810 [INFO] ============================================================
+2026-10-18 22:53:55,811 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 22:53:55,811 [INFO] Capital: 4,500,000
+2026-10-18 22:53:55,811 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:53:55,811 [INFO] Time: 2026-10-18T22:53:55.811918
+2026-10-18 22:53:55,812 [INFO] SIMULATION MODE - No real orders
+2026-10-18 22:53:55,917 [INFO] ============================================================
+2026-10-18 22:53:55,917 [INFO] STEP 1: Scanning signals...
+2026-10-18 22:53:55,918 [INFO]   Market gap: +0.00%
+2026-10-18 22:53:56,235 [INFO]   Found 0 signals:
+2026-10-18 22:53:56,235 [INFO] No signals. Done.
+2026-10-18 22:54:10,415 [INFO] ============================================================
+2026-10-18 22:54:10,415 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 22:54:10,415 [INFO] Capital: 4,500,000
+2026-10-18 22:54:10,415 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:54:10,415 [INFO] Time: 2026-10-18T22:54:10.415851
+2026-10-18 22:54:10,416 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 22:54:10,453 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 22:54:12,190 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 22:56:19,671 [INFO] ============================================================
+2026-10-18 22:56:19,671 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 22:56:19,671 [INFO] Capital: 4,500,000
+2026-10-18 22:56:19,672 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 22:56:19,672 [INFO] Time: 2026-10-18T22:56:19.672125
+2026-10-18 22:56:19,672 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 22:56:19,705 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 22:56:21,424 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 23:00:01,283 [INFO] ============================================================
+2026-10-18 23:00:01,283 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 23:00:01,284 [INFO] Capital: 4,500,000
+2026-10-18 23:00:01,284 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 23:00:01,284 [INFO] Time: 2026-10-18T23:00:01.284341
+2026-10-18 23:00:01,284 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 23:00:01,324 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 23:00:03,098 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 23:02:16,996 [INFO] ============================================================
+2026-10-18 23:02:16,997 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 23:02:16,997 [INFO] Capital: 4,500,000
+2026-10-18 23:02:16,998 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 23:02:16,998 [INFO] Time: 2026-10-18T23:02:16.998558
+2026-10-18 23:02:16,998 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 23:02:17,038 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 23:02:18,725 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 23:02:33,627 [INFO] ============================================================
+2026-10-18 23:02:33,628 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 23:02:33,628 [INFO] Capital: 4,500,000
+2026-10-18 23:02:33,628 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 23:02:33,629 [INFO] Time: 2026-10-18T23:02:33.629080
+2026-10-18 23:02:33,629 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 23:02:33,667 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 23:02:35,377 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 23:04:05,506 [INFO] ============================================================
+2026-10-18 23:04:05,507 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 23:04:05,507 [INFO] Capital: 4,500,000
+2026-10-18 23:04:05,508 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 23:04:05,508 [INFO] Time: 2026-10-18T23:04:05.508684
+2026-10-18 23:04:05,509 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 23:04:05,543 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 23:04:07,305 [ERROR] FATAL: Login failed: 602
+Traceback (most recent call last):
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 624, in run
+    self.connect()
+    ~~~~~~~~~~~~^^
+  File "C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\gap_fade_auto.py", line 203, in connect
+    raise ConnectionError(f"Login failed: {msg}")
+ConnectionError: Login failed: 602
+2026-10-18 23:22:16,715 [INFO] ============================================================
+2026-10-18 23:22:16,716 [INFO] GAP FADE v3 AUTO TRADER (Capital SKCOM)
+2026-10-18 23:22:16,716 [INFO] Capital: 4,500,000
+2026-10-18 23:22:16,717 [INFO] Mode: FULLY AUTOMATIC
+2026-10-18 23:22:16,717 [INFO] Time: 2026-10-18T23:22:16.717912
+2026-10-18 23:22:16,718 [INFO] Connecting to Capital Securities (SKCOM)...
+2026-10-18 23:22:16,768 [INFO]   [Reply] D121280815: SKReplyLib_OnReplyMessage:Announcement callback.
+2026-10-18 23:22:18,332 [INFO] Login OK: SK_SUCCESS
+2026-10-18 23:22:20,334 [WARNING] Account not received via callback, trying direct query...
+2026-10-18 23:22:20,335 [INFO] Account: 918D0495371
+2026-10-18 23:22:21,683 [INFO] Connected. Ready to trade.
+2026-10-18 23:22:21,944 [INFO] ============================================================
+2026-10-18 23:22:21,944 [INFO] STEP 1: Scanning signals...
+2026-10-18 23:22:21,945 [INFO]   Market gap: +0.00%
+2026-10-18 23:22:22,639 [INFO]   Found 0 signals:
+2026-10-18 23:22:22,639 [INFO] No signals. Done.
+2026-10-18 23:22:22,644 [INFO] Disconnected.
