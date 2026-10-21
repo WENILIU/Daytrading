@@ -135,7 +135,7 @@ class Config:
     max_daily_exposure = 0.75
 
     # --- Cost ---
-    cost_per_trade = 0.000991  # 1.7折 + 當沖稅減半
+    cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
 
     # --- Fugle (real-time scanning) ---
     fugle_api_key = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
