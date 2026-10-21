@@ -134,7 +134,13 @@ class Config:
 
     # --- Limits ---
     max_daily_positions = 15
-    max_daily_exposure = 0.75
+    max_daily_exposure = 0.75  # 5% signals cap
+    max_total_exposure = 1.50  # Total cap including 3-5% signals (requires margin)
+
+    # --- 3-5% Gap Module (activates only during market drawdown) ---
+    gap_threshold_low = 0.03   # Lower gap threshold
+    mkt_dd_threshold = -0.05   # Only scan 3-5% when market drawdown < -5%
+    pos_low_pct = 0.05         # Flat position for 3-5% signals
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
@@ -235,6 +241,7 @@ class Signal:
     zhangting: float = 0.0
     dieding: float = 0.0
     is_at_limit: bool = False
+    is_low_gap: bool = False
 
 
 
@@ -377,6 +384,7 @@ class GapFadeAutoTrader:
         self.quote_lib = None
         self.restricted_stocks = set()  # 處置股 (no day trading allowed)
         self.market_gap = 0.0
+        self.market_drawdown = 0.0
         self._logged_in = False
 
         # Setup logging
@@ -568,6 +576,23 @@ class GapFadeAutoTrader:
     # STEP 1: 9:00 SCAN (Fugle API for bulk speed)
     # ----------------------------------------------------------
 
+    def _calc_market_drawdown(self) -> float:
+        """Calculate 20-day market drawdown from 0050."""
+        try:
+            import yfinance as yf
+            idx = yf.Ticker("0050.TW")
+            hist = idx.history(period="1mo")
+            if len(hist) < 10:
+                return 0.0
+            current = hist['Close'].iloc[-1]
+            rolling_max = hist['Close'].max()
+            dd = (current - rolling_max) / rolling_max
+            self.log.info(f"  Market drawdown: {dd*100:.1f}%")
+            return dd
+        except Exception as e:
+            self.log.warning(f"  Market drawdown calc failed: {e}")
+            return 0.0
+
     def scan_signals(self) -> list[Signal]:
         """9:00 scan all stocks via TWSE public API (~5 seconds, free, no auth)."""
 
@@ -687,6 +712,31 @@ class GapFadeAutoTrader:
             elif sig.direction == Direction.LONG and abs(sig.open_price - ld) < 0.01:
                 sig.is_at_limit = True
 
+        # --- 3-5% Gap Module (only during market drawdown) ---
+        self.market_drawdown = self._calc_market_drawdown()
+        if self.market_drawdown < self.config.mkt_dd_threshold:
+            self.log.info(f"  Market DD {self.market_drawdown*100:.1f}% < {self.config.mkt_dd_threshold*100:.0f}%: scanning 3-5% gaps")
+            low_signals = []
+            for c in candidates:
+                adj_gap = c["raw_gap"] - self.market_gap
+                if self.config.gap_threshold_low <= abs(adj_gap) < self.config.gap_threshold:
+                    direction = Direction.SHORT if adj_gap > 0 else Direction.LONG
+                    sig = Signal(
+                        symbol=c["symbol"], name=c["name"],
+                        direction=direction, open_price=c["openPrice"],
+                        prev_close=c["previousClose"], raw_gap=c["raw_gap"],
+                        adj_gap=adj_gap,
+                    )
+                    sig.is_low_gap = True
+                    lu, ld = calc_price_limits(sig.prev_close)
+                    sig.zhangting = lu
+                    sig.dieding = ld
+                    low_signals.append(sig)
+            self.log.info(f"  3-5% signals found: {len(low_signals)}")
+            signals.extend(low_signals)
+        else:
+            self.log.info(f"  Market DD {self.market_drawdown*100:.1f}%: 3-5% module OFF")
+
         # Compute stock-level features for Model C
         if self.config.position_model == "C":
             self._compute_stock_features(signals)
@@ -770,10 +820,14 @@ class GapFadeAutoTrader:
             # Use open price as entry (immediate execution at market open)
             entry_price = sig.open_price
 
-            # Model B: Dynamic position sizing based on market regime
+            # Position sizing: Model C for 5%+, flat for 3-5%
             abs_gap = abs(sig.adj_gap)
-            pos_pct = self._calc_position_score(sig)
-            sig.tier = f"B{int(pos_pct*100)}%"
+            if getattr(sig, 'is_low_gap', False):
+                pos_pct = self.config.pos_low_pct
+                sig.tier = f"LOW{int(pos_pct*100)}%"
+            else:
+                pos_pct = self._calc_position_score(sig)
+                sig.tier = f"B{int(pos_pct*100)}%"
             sig.tier_multiplier = pos_pct / 0.05  # Normalize for logging
 
             # Calculate position
@@ -786,7 +840,8 @@ class GapFadeAutoTrader:
 
             # Check exposure limit
             actual_value = shares * entry_price
-            if total_exposure + actual_value > self.config.capital * self.config.max_daily_exposure:
+            cap = self.config.max_total_exposure if getattr(sig, 'is_low_gap', False) else self.config.max_daily_exposure
+            if total_exposure + actual_value > self.config.capital * cap:
                 self.log.info(f"  {sig.symbol}: exposure limit, SKIP")
                 continue
 
