@@ -145,6 +145,9 @@ class Config:
     circuit_breaker_pct = -0.03  # Stop opening new positions if daily PnL < -3%
     vol_targeting = True         # Scale positions inversely with market vol
     dir_concentration_limit = 0.80  # If >80% same direction, halve positions
+    equity_dd_threshold = 0.025    # Reduce positions when equity DD > 2.5% from peak
+    equity_dd_scale = 0.3          # Scale factor when in drawdown (30% of normal)
+    equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
@@ -390,6 +393,11 @@ class GapFadeAutoTrader:
         self.market_gap = 0.0
         self.market_drawdown = 0.0
         self._logged_in = False
+
+        # Equity drawdown control state
+        self._peak_equity = config.capital
+        self._current_equity = config.capital
+        self._load_equity_state()
 
         # Setup logging
         config.log_dir.mkdir(parents=True, exist_ok=True)
@@ -838,8 +846,19 @@ class GapFadeAutoTrader:
                 sig.tier = f"B{int(pos_pct*100)}%"
             sig.tier_multiplier = pos_pct / 0.05  # Normalize for logging
 
+            # Equity drawdown control: reduce positions when in drawdown
+            if not hasattr(self, '_risk_scale'):
+                self._risk_scale = 1.0
+                dd_from_peak = (self._current_equity - self._peak_equity) / self._peak_equity
+                if dd_from_peak < -self.config.equity_dd_threshold:
+                    self._risk_scale = self.config.equity_dd_scale
+                    self.log.info(f"  EQUITY DD CONTROL: drawdown {dd_from_peak*100:.1f}%, scaling to {self.config.equity_dd_scale*100:.0f}%")
+                elif dd_from_peak < -self.config.equity_dd_threshold * 0.5:
+                    self._risk_scale = (1 + self.config.equity_dd_scale) / 2
+                    self.log.info(f"  EQUITY DD CONTROL: drawdown {dd_from_peak*100:.1f}%, scaling to {self._risk_scale*100:.0f}%")
+
             # Calculate position
-            position_value = self.config.capital * pos_pct
+            position_value = self.config.capital * pos_pct * self._risk_scale
             shares = int(position_value / entry_price / 1000) * 1000
 
             if shares < 1000:
@@ -1341,6 +1360,41 @@ class GapFadeAutoTrader:
         csv_path = self.config.log_dir / f"trades_{today}.csv"
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
         self.log.info(f"  Saved: {csv_path}")
+
+        # Update equity state
+        self._current_equity += total_pnl
+        if self._current_equity > self._peak_equity:
+            self._peak_equity = self._current_equity
+        self._save_equity_state()
+        self.log.info(f"  Equity: {self._current_equity:,.0f} (peak: {self._peak_equity:,.0f})")
+
+    def _load_equity_state(self):
+        """Load peak/current equity from persistent state file."""
+        try:
+            path = self.config.equity_state_path
+            if path.exists():
+                import json
+                state = json.loads(path.read_text(encoding='utf-8'))
+                self._peak_equity = state.get('peak_equity', self.config.capital)
+                self._current_equity = state.get('current_equity', self.config.capital)
+                self.log.info(f"  Loaded equity state: peak={self._peak_equity:,.0f} current={self._current_equity:,.0f}")
+        except Exception as e:
+            self.log.warning(f"  Failed to load equity state: {e}")
+
+    def _save_equity_state(self):
+        """Persist peak/current equity for drawdown control across sessions."""
+        try:
+            import json
+            path = self.config.equity_state_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            state = {
+                'peak_equity': self._peak_equity,
+                'current_equity': self._current_equity,
+                'updated': datetime.now().isoformat()
+            }
+            path.write_text(json.dumps(state, indent=2), encoding='utf-8')
+        except Exception as e:
+            self.log.warning(f"  Failed to save equity state: {e}")
 
     # ----------------------------------------------------------
     # MAIN LOOP
