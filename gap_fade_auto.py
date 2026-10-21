@@ -128,7 +128,7 @@ class Config:
     # --- Exit ---
     stop_loss_pct = 0.05
     take_profit_pct = 0.12  # TP for strong signals (score >= threshold)
-    take_profit_low_pct = 0.06  # TP for weak signals (score < threshold)
+    take_profit_low_pct = 0.07  # TP for weak signals (score < threshold, same as baseline)
     tp_score_threshold = 3  # Score cutoff for TP switch
     force_exit_time = "13:25"
 
@@ -1018,7 +1018,7 @@ class GapFadeAutoTrader:
         else: return 0.02
 
     def _get_tp_pct(self, sig) -> float:
-        """Score-based dynamic TP: weak signals TP=6%, strong signals TP=12%."""
+        """Score-based dynamic TP: weak signals TP=7%, strong signals TP=12%."""
         score = getattr(sig, '_score', 0)
         if score < self.config.tp_score_threshold:
             return self.config.take_profit_low_pct
