@@ -144,6 +144,7 @@ class Config:
     pos_low_pct = 0.05         # Flat position for 3-5% signals
     circuit_breaker_pct = -0.03  # Stop opening new positions if daily PnL < -3%
     vol_targeting = True         # Scale positions inversely with market vol
+    dir_concentration_limit = 0.80  # If >80% same direction, halve positions
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
@@ -847,6 +848,15 @@ class GapFadeAutoTrader:
 
             # Check exposure limit
             actual_value = shares * entry_price
+            # Direction concentration: reduce size if all same direction
+            if not hasattr(self, '_dir_scale'):
+                self._dir_scale = 1.0
+                if len(self.signals) >= 3:
+                    short_count = sum(1 for s in self.signals if s.direction == Direction.SHORT)
+                    short_pct = short_count / len(self.signals)
+                    if short_pct > self.config.dir_concentration_limit or short_pct < (1 - self.config.dir_concentration_limit):
+                        self._dir_scale = 0.5
+                        self.log.info(f"  Direction concentrated ({short_pct*100:.0f}% SHORT): scaling to 50%")
             # Circuit breaker: stop if daily PnL too negative
             if hasattr(self, '_daily_pnl_so_far') and self._daily_pnl_so_far < self.config.circuit_breaker_pct:
                 self.log.info(f"  CIRCUIT BREAKER: daily PnL {self._daily_pnl_so_far*100:.1f}% < {self.config.circuit_breaker_pct*100:.0f}%, stop")
