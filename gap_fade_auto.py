@@ -127,7 +127,9 @@ class Config:
 
     # --- Exit ---
     stop_loss_pct = 0.05
-    take_profit_pct = 0.07
+    take_profit_pct = 0.12  # TP for strong signals (score >= threshold)
+    take_profit_low_pct = 0.06  # TP for weak signals (score < threshold)
+    tp_score_threshold = 3  # Score cutoff for TP switch
     force_exit_time = "13:25"
 
     # --- Limits ---
@@ -801,17 +803,19 @@ class GapFadeAutoTrader:
             sig.sl_price = sl_price
             sig._sl_pct = sl_pct  # store for Smart Trade
 
+            tp_pct = self._get_tp_pct(sig)
             if sig.direction == Direction.SHORT:
-                sig.tp_price = round(entry_price * (1 - self.config.take_profit_pct), 1)
+                sig.tp_price = round(entry_price * (1 - tp_pct), 1)
             else:
-                sig.tp_price = round(entry_price * (1 + self.config.take_profit_pct), 1)
+                sig.tp_price = round(entry_price * (1 + tp_pct), 1)
+            sig._tp_pct = tp_pct
 
             limit_up, limit_down = calc_price_limits(sig.prev_close)
             self.log.info(
                 f"  ENTER {sig.symbol} {sig.direction.value} "
                 f"price={entry_price} shares={shares} tier={sig.tier} "
                 f"SL={sig.sl_price}({getattr(sig, '_sl_pct', 0)*100:.1f}%) "
-                f"TP={sig.tp_price} | limit={limit_up}/{limit_down}")
+                f"TP={sig.tp_price}({getattr(sig, '_tp_pct', 0)*100:.0f}%) | limit={limit_up}/{limit_down}")
 
             # Place order
             self._place_entry_order(sig)
@@ -1002,6 +1006,9 @@ class GapFadeAutoTrader:
             if 1 <= freq <= 4: score += 1
             elif freq >= 6: score -= 2
 
+        # Store raw score for TP calculation
+        sig._score = score
+
         # === MAP SCORE TO POSITION ===
         if score >= 10: return 0.12
         elif score >= 7: return 0.09
@@ -1009,6 +1016,13 @@ class GapFadeAutoTrader:
         elif score >= 3: return 0.05
         elif score >= 1: return 0.04
         else: return 0.02
+
+    def _get_tp_pct(self, sig) -> float:
+        """Score-based dynamic TP: weak signals TP=6%, strong signals TP=12%."""
+        score = getattr(sig, '_score', 0)
+        if score < self.config.tp_score_threshold:
+            return self.config.take_profit_low_pct
+        return self.config.take_profit_pct
 
     def _place_entry_order(self, sig: Signal):
         """Place Smart Trade order (entry + SL + TP + ForceClose in one shot)"""
@@ -1034,7 +1048,7 @@ class GapFadeAutoTrader:
         # Take Profit (percentage-based)
         oOrder.nTakeProfitFlag = 1
         oOrder.nRDOTPPercent = 1
-        oOrder.bstrTPPercent = str(int(self.config.take_profit_pct * 100))
+        oOrder.bstrTPPercent = str(int(getattr(sig, "_tp_pct", self.config.take_profit_pct) * 100))
         oOrder.nRDTPMarketPriceType = 1  # 市價觸發
 
         # Force close at 13:25
@@ -1062,7 +1076,7 @@ class GapFadeAutoTrader:
             self.log.info(
                 f"  SMART ORDER: {sig.symbol} {sig.direction.value} {sig.shares} shares "
                 f"@ {sig.entry_price} [{sig.tier}] "
-                f"SL={self.config.stop_loss_pct*100:.0f}% TP={self.config.take_profit_pct*100:.0f}% "
+                f"SL={self.config.stop_loss_pct*100:.0f}% TP={getattr(sig, '_tp_pct', self.config.take_profit_pct)*100:.0f}% "
                 f"ForceClose=13:25")
         else:
             msg = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)
@@ -1539,6 +1553,9 @@ class GapFadeSimulator(GapFadeAutoTrader):
             freq = getattr(sig, "stock_signal_freq", 0)
             if 1 <= freq <= 4: score += 1
             elif freq >= 6: score -= 2
+
+        # Store raw score for TP calculation
+        sig._score = score
 
         # === MAP SCORE TO POSITION ===
         if score >= 10: return 0.12
