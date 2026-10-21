@@ -80,6 +80,23 @@ def get_restricted_stocks() -> set:
     
     return restricted
 
+
+def get_borrowable_stocks() -> set | None:
+    """Get stocks eligible for short-selling (securities lending available).
+    Returns None if data unavailable (skip filter)."""
+    try:
+        from finlab import data as fdata
+        lfv = fdata.get('etl:lending_fee_volume')
+        borrowable = set()
+        for stock in lfv.columns:
+            if (lfv[stock] > 0).any():
+                borrowable.add(stock)
+        return borrowable
+    except Exception:
+        return None
+
+
+
 class Config:
     # --- Capital Securities credentials ---
     cust_cert_id = "D121280815"       # 身分證字號
@@ -92,7 +109,7 @@ class Config:
     gap_threshold = 0.05
     min_price = 30
     max_price = 225
-    min_dollar_volume_t1 = 10_000_000  # T-1 turnover >= 10M TWD
+    min_dollar_volume_t1 = 3_000_000  # T-1 turnover >= 3M TWD
 
     # --- Entry: 9:00 immediate (no confirmation wait) ---
     confirm_wait_minutes = 0
@@ -100,7 +117,7 @@ class Config:
 
     # --- Position sizing: Model B/C (Market + Stock Regime Dynamic) ---
     # Model B: market-only. CAGR 165%, MDD -5.5% (WF validated)
-    # Model C: market + stock. CAGR 208%, MDD -6.9% (WF validated, wins all windows)
+    # Model C: market + stock. CAGR ~99%, MDD -5.2% (with 處置+借券+流動性 filters)
     # Switch: "B" = market only, "C" = market + stock (recommended)
     position_model = "C"
     pos_min_pct = 0.02   # Minimum position (low-quality signals)
@@ -109,16 +126,16 @@ class Config:
     long_position_pct = 0.05  # Fallback (unused, kept for compat)
 
     # --- Exit ---
-    stop_loss_pct = 0.06
-    take_profit_pct = 0.04
+    stop_loss_pct = 0.05
+    take_profit_pct = 0.07
     force_exit_time = "13:25"
 
     # --- Limits ---
     max_daily_positions = 15
-    max_daily_exposure = 0.70
+    max_daily_exposure = 0.75
 
     # --- Cost ---
-    cost_per_trade = 0.0017
+    cost_per_trade = 0.000991  # 1.7折 + 當沖稅減半
 
     # --- Fugle (real-time scanning) ---
     fugle_api_key = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
@@ -557,6 +574,9 @@ class GapFadeAutoTrader:
 
         # Load restricted stocks
         self.restricted_stocks = get_restricted_stocks()
+        self.borrowable_stocks = get_borrowable_stocks()
+        if self.borrowable_stocks:
+            self.log.info(f"  Borrowable stocks: {len(self.borrowable_stocks)}")
         if self.restricted_stocks:
             self.log.info(f"  Loaded {len(self.restricted_stocks)} restricted stocks")
 
@@ -604,8 +624,12 @@ class GapFadeAutoTrader:
                 if dollar_vol < self.config.min_dollar_volume_t1:
                     continue
 
-                # Skip restricted
+                # Skip restricted (處置股)
                 if stock_no in self.restricted_stocks:
+                    continue
+
+                # Skip non-borrowable stocks (cannot short-sell)
+                if self.borrowable_stocks is not None and stock_no not in self.borrowable_stocks:
                     continue
 
                 # Calculate gap
