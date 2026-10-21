@@ -142,6 +142,7 @@ class Config:
     gap_threshold_low = 0.03   # Lower gap threshold
     mkt_dd_threshold = -0.05   # Only scan 3-5% when market drawdown < -5%
     pos_low_pct = 0.05         # Flat position for 3-5% signals
+    circuit_breaker_pct = -0.03  # Stop opening new positions if daily PnL < -3%
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
@@ -845,6 +846,10 @@ class GapFadeAutoTrader:
 
             # Check exposure limit
             actual_value = shares * entry_price
+            # Circuit breaker: stop if daily PnL too negative
+            if hasattr(self, '_daily_pnl_so_far') and self._daily_pnl_so_far < self.config.circuit_breaker_pct:
+                self.log.info(f"  CIRCUIT BREAKER: daily PnL {self._daily_pnl_so_far*100:.1f}% < {self.config.circuit_breaker_pct*100:.0f}%, stop")
+                break
             cap = self.config.max_total_exposure if getattr(sig, 'is_low_gap', False) else self.config.max_daily_exposure
             if total_exposure + actual_value > self.config.capital * cap:
                 self.log.info(f"  {sig.symbol}: exposure limit, SKIP")
