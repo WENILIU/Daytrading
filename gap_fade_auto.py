@@ -142,7 +142,6 @@ class Config:
     gap_threshold_low = 0.03   # Lower gap threshold
     mkt_dd_threshold = -0.05   # Only scan 3-5% when market drawdown < -5%
     pos_low_pct = 0.05         # Flat position for 3-5% signals
-    circuit_breaker_pct = -0.03  # Stop opening new positions if daily PnL < -3%
     vol_targeting = True         # Scale positions inversely with market vol
     dir_concentration_limit = 0.80  # If >80% same direction, halve positions
     equity_dd_threshold = 0.025    # Reduce positions when equity DD > 2.5% from peak
@@ -876,10 +875,6 @@ class GapFadeAutoTrader:
                     if short_pct > self.config.dir_concentration_limit or short_pct < (1 - self.config.dir_concentration_limit):
                         self._dir_scale = 0.5
                         self.log.info(f"  Direction concentrated ({short_pct*100:.0f}% SHORT): scaling to 50%")
-            # Circuit breaker: stop if daily PnL too negative
-            if hasattr(self, '_daily_pnl_so_far') and self._daily_pnl_so_far < self.config.circuit_breaker_pct:
-                self.log.info(f"  CIRCUIT BREAKER: daily PnL {self._daily_pnl_so_far*100:.1f}% < {self.config.circuit_breaker_pct*100:.0f}%, stop")
-                break
             cap = self.config.max_total_exposure if getattr(sig, 'is_low_gap', False) else self.config.max_daily_exposure
             if total_exposure + actual_value > self.config.capital * cap:
                 self.log.info(f"  {sig.symbol}: exposure limit, SKIP")

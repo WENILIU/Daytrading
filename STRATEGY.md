@@ -31,7 +31,6 @@ vol_mult: target_vol / actual_vol (cap 0.5-2.0)
 dir_scale: 0.5 if >80% same direction
 risk_scale: 0.3 if equity DD > 2.5%
 Score filter: skip < 1
-Circuit breaker: daily PnL < -3% → stop
 Exposure: 296% (需融資額度 ~1,330萬)
 TP: 7% (score<3) / 12% (score≥3)
 SL: 5% (dynamic, capped by price limit)
@@ -115,14 +114,14 @@ Capital: 450萬
 
 ```
 第1層: Equity DD Control    → 淨值回撤>2.5% 全場縮至30%（防連續虧損）
-第2層: Circuit Breaker      → 當日虧損>3% 停止開新倉（防單日災難）
-第3層: Direction Limit      → 同向>80% 減半（防集中風險）
-第4層: Vol Targeting        → 高波動日自動縮小（防尾部風險）
-第5層: Per-trade SL         → 每筆最大虧 5%（防單筆失控）
-第6層: Price Limit Guard    → SL 不超過漲跌停（防鎖死）
+第2層: Direction Limit      → 同向>80% 減半（防集中風險）
+第3層: Vol Targeting        → 高波動日自動縮小（防尾部風險）
+第4層: Per-trade SL         → 每筆最大虧 5%（防單筆失控）
+第5層: Price Limit Guard    → SL 不超過漲跌停（防鎖死）
 ```
 
 各層互相獨立，任何一層觸發都會降低風險。
+所有保護機制均在盤前或開盤瞬間決定，不依賴觀察成交結果。
 
 ---
 
