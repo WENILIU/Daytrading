@@ -185,10 +185,12 @@ def get_tick_size(price: float) -> float:
 
 
 def calc_price_limits(prev_close: float) -> tuple:
-    """Calculate limit-up/limit-down from previous close."""
+    """Calculate limit-up/limit-down from previous close.
+    TWSE rule: limit_up rounds DOWN to tick, limit_down rounds UP to tick."""
+    import math
     tick = get_tick_size(prev_close)
-    limit_up = round(prev_close * 1.10 / tick) * tick
-    limit_down = round(prev_close * 0.90 / tick) * tick
+    limit_up = math.floor(prev_close * 1.10 / tick) * tick
+    limit_down = math.ceil(prev_close * 0.90 / tick) * tick
     return round(limit_up, 2), round(limit_down, 2)
 
 
