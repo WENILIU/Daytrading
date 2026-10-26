@@ -638,3 +638,65 @@ Scan done in 1.3s (898 valid quotes)
 `now` 印的 `Market gap` 與訊號日期要一起看。
 `scan` 模式只測速度與涵蓋率、不產訊號，因此不受這個影響（它印的 `has_open`
 是 10-22 的開盤價，正好用來驗證「兩個市場都抓得到」）。
+
+---
+
+## 10. 一整天跑下來的日誌地圖（2026-10-26 補）
+
+所有東西都寫進 `trading_logs\trading_YYYY-MM-DD.log`，外加
+`trading_logs\exec_report_YYYYMMDD.json`（結構化的執行資料，含 `fill_prices`
+與 `fill_raw`）。下面每一行都對應一個「實盤可能跟回測不一樣」的地方，
+跑完一天照這個順序掃一遍就能定位問題。
+
+### 階段 0：08:55 前置檢查
+| 日誌行 | 正常 | 異常代表 |
+|---|---|---|
+| `Restricted from finlab in X.XXs: N 處置 (both markets), M 暫停先賣後買當沖` | 有，且 N/M 是數字 | 看到 `came from the exchange announcement pages` → 退化成會漏 5/14 的路徑；看到 `DISPOSAL PANEL STALE` → 三條源全死 |
+| `FINLAB DISPOSAL STALE: newest 處置 announcement is ...` | 不出現 | finlab 資料落後 >5 天，今天的處置股沒排到 |
+| `Factor panel as-of <date> (lag Nd)` | lag ≤ 10 日曆天 | `FACTOR PANEL STALE` → 模型改餵 NaN，邊際大幅縮（實測 2023-25 區段 1692%→260%） |
+
+### 階段 1：09:00 掃描
+| 日誌行 | 要看什麼 |
+|---|---|
+| `Stock universe: N codes` → `Query list after pre-open filters: M codes` | 漏斗是否正常（實測 1,928 → ~905） |
+| `Pre-open trim: dropped A below turnover floor, B disposal, kept M (C without panel data...)` | `C without panel data` 不該變大，變大代表面板沒覆蓋到 |
+| `Scan via Fugle (TWSE+TPEx): M quotes in X.Xs` | **必須是 Fugle**。出現 `falling back to TWSE MIS` = 上櫃看不到 |
+| `COVERAGE: full universe answered (TPEx rows in feed: N)` | N 要 ≈ 850。掉到 0 = 上櫃又漏了 |
+| `Market gap (0050 open, v13 def): +X.XX%` | 必须是 `0050 open` 這版定義。出現 `FALLBACK (7 large caps, NOT v13 def)` = 基準換了，訊號不可比 |
+| `Opening-locked (excluded by v13): N` | 開盤鎖漲/跌停被排掉的數量 |
+| `Rejected for no-borrowable: N` | 若同時出現 `Borrowable list UNAVAILABLE` → SHORT 腿完全沒驗證 |
+| `Model scored X candidates -> kept Y; TP20 share Z%` | `TP20 share` 是動態 TP 的占比，跟回測差很多就是模型輸入跑掉了 |
+
+### 階段 2：09:00 下單
+| 日誌行 | 要看什麼 |
+|---|---|
+| `Market regime: DD=.. Vol=.. ConsecDown=.. 3dRet=.. PrevRet=..` | 倉位縮放的全部輸入。要能重現當天為什麼部位大/小 |
+| `ENTER <code> SHORT price=.. shares=.. tier=.. SL=..(x%) TP=..(y%) \| limit=up/down` | **這行是重現決策的完整憑證**：進場價、張數、停損停利、漲跌停。逐筆對回測 |
+| `<code>: < 1 zhang, SKIP` / `exposure cap reached, SKIP` / `Skipped (at price limit): N` | 回測會下但實盤跳過的單，全部有原因 |
+| `Total exposure: N (P%)` | 零融資上限 100%，超過就是 bug |
+| `[OrderResult] ...` / `[FILL] ...` / `[CANCEL] ...` | 券商原始回執，保留原文供對帳 |
+
+### 階段 3：盤中監控
+`monitor_positions()` 每 60 秒批次取一次價（§7C），觸發時走 `_mark_exit`。
+**注意**：實盤的停損停利是群益智慧單在**交易所**執行，我們的監控只做回報。
+所以「我們看到觸發」跟「券商實際成交」是兩件事，最終要以 `[FILL]` 為準。
+
+### 階段 4：13:25 收盤回報（`EXECUTION RISK REPORT`）
+| 日誌行 | 這是什麼 |
+|---|---|
+| `RISK1 opening price visible: X.XXs after 09:00:00` | 開盤價幾秒後才看得到。**上實盤前唯一還沒量的數字** |
+| `RISK1 scan finished: X.XXs after 09:00:00 (scan itself took Y.Ys)` | 從開盤到全部訊號算完 |
+| `MARKET COVERAGE: A/B codes answered, C silent` | 兩市涵蓋率 |
+| `submit->ack n=.. median=..ms` | 下單通道速度 |
+| `order submission: N orders in X.Xs (R orders/s)` | 22 筆要多久送完 |
+| `filled within 5/10/30/60s of 09:00: k/n` | 開盤幾秒內成交幾筆 |
+| `ENTRY SLIPPAGE ... SHORT n=.. median_edge=..% \| LONG n=.. median_edge=..%` | **本輪新增**。成交價 vs 回測假設價。`edge>0` 一律代表有利：SHORT 成交較高為正、LONG 較低為正。這是「模型邊際能不能活過現實」的數字 |
+| `[FILL] price recovered at numeric field #N` | 第一次實盤用它反推 OnFill 欄位順序，確認後寫死 |
+| `[FILL] <code>: cannot isolate the fill price (candidates=..)` | 無法判定成交價 → 用日誌裡的原始 args 修正欄位索引 |
+| `rejected orders: N retried: M` + 逐筆 `code=..` | 被券商拒絕的原因 |
+
+### 已知仍未記的事（誠實列）
+- **智慧單實際掛出去的條件**：`SendStockStrategyDayTrade` 的回執有條件單號，
+  但「券商端實際生效的停損停利條件」沒有回讀驗證。要在群益 App 對。
+- **盤中觸發順序**：1 分 K 才有，日誌只有 60 秒一次的取價快照。
+- **融資額度**：零融資設定下不會觸發，但額度實際多少沒有查。

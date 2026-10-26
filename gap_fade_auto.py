@@ -1833,15 +1833,71 @@ class GapFadeAutoTrader:
     # EXECUTION TELEMETRY (pre-live risk measurement)
     # ----------------------------------------------------------
     fill_events: dict = {}
+    fill_prices: dict = {}
+    fill_raw: dict = {}
     exec_stats: dict = {}
 
     def _note_fill(self, raw: str):
-        """Record fill arrival time per stock -> measures fill rate within N seconds of open."""
+        """Record fill time, and try to recover the fill price.
+
+        Time alone is not enough to review a live session: the number that
+        decides whether the backtest is real is the fill PRICE versus the price
+        we intended to trade at. The SKCOM OnFill argument layout is not
+        documented in the wrapper and I have not seen a live fill, so instead of
+        hard-coding a positional index I identify the price by plausibility -
+        the intended entry is known and a same-day fill cannot be outside the
+        price limits. The field index is logged so the first live session
+        reveals the real layout and this guess-work can be replaced by a direct
+        index. Ambiguous cases are logged, never guessed.
+        """
         import re as _re
         code = _re.search(r"\b(\d{4,5})\b", raw)
         if not code:
             return
-        self.fill_events.setdefault(code.group(1), []).append(time.time())
+        sym = code.group(1)
+        self.fill_events.setdefault(sym, []).append(time.time())
+        self.fill_raw.setdefault(sym, []).append(raw)
+
+        sig = self.active_positions.get(sym)
+        intended = float(getattr(sig, "entry_price", 0) or 0) if sig else 0.0
+        if intended <= 0:
+            return
+        # calc_price_limits returns (limit_up, limit_down) - naming them lo/hi
+        # in the wrong order silently inverts the window and nothing ever
+        # matches, so sort explicitly.
+        lim_a, lim_b = calc_price_limits(intended)
+        lo, hi = min(lim_a, lim_b), max(lim_a, lim_b)
+        # Drop quoted fields first. The stock code is itself a number and for
+        # many names it lands inside the price band (2330 at 2435 has a
+        # 2195-2675 window), so parsing the raw tuple would call the code a
+        # price. Prices and quantities are bare numbers; symbols and broker ids
+        # are quoted. Indices below therefore count NUMERIC fields, not tuple
+        # positions - enough to identify the layout on the first live run.
+        body = _re.sub(r"'[^']*'", " ", raw)
+        cand = []
+        for i, tok in enumerate(_re.findall(r"-?\d+\.?\d*", body)):
+            try:
+                v = float(tok)
+            except ValueError:
+                continue
+            if v >= 1 and lo <= v <= hi:
+                cand.append((i, v))
+        uniq = sorted({v for _, v in cand})
+        if len(uniq) == 1:
+            self.fill_prices.setdefault(sym, []).append(uniq[0])
+            if sig is not None:
+                sig.fill_price = uniq[0]
+            if not self.exec_stats.get("fill_field_index_logged"):
+                self.exec_stats["fill_field_index_logged"] = True
+                self.log.info(
+                    f"  [FILL] price recovered at numeric field "
+                    f"#{cand[0][0]} ({sym} -> {uniq[0]}) - if that is right, "
+                    f"hard-code the index in _note_fill")
+        else:
+            self.log.warning(
+                f"  [FILL] {sym}: cannot isolate the fill price "
+                f"(intended={intended}, price window {lo}-{hi}, "
+                f"candidates={cand[:8]}) - raw args are in the log above")
 
     def _note_ack(self, raw: str):
         self.exec_stats.setdefault("acks", []).append((time.time(), raw[:200]))
@@ -1887,12 +1943,57 @@ class GapFadeAutoTrader:
         self.log.info(f"  rejected orders: {len(rej)}  retried: {len(retr)}")
         for r in rej[:10]:
             self.log.info(f"    {r['symbol']} code={r['ack_code']} {r.get('msg','')}")
+
+        # Entry slippage. The backtest fills at the 09:00:00 opening price;
+        # reality fills seconds later at a different price. This is the one
+        # number that says how much of the modelled edge survives contact with
+        # the market, and it is direction-dependent: filling higher than
+        # intended helps a SHORT entry (we sell dearer) and hurts a LONG one.
+        # edge > 0 always means favourable.
+        slips = {"SHORT": [], "LONG": []}
+        for sym, prices in self.fill_prices.items():
+            sig = self.active_positions.get(sym)
+            intended = float(getattr(sig, "entry_price", 0) or 0) if sig else 0.0
+            if intended <= 0:
+                continue
+            d = getattr(sig, "direction", None)
+            dname = d.value if d in (Direction.SHORT, Direction.LONG) else None
+            if dname not in slips:
+                continue
+            fill = prices[0]
+            slip = (fill - intended) / intended
+            slips[dname].append((sym, intended, fill, slip,
+                                 slip if dname == "SHORT" else -slip))
+        got = [x for v in slips.values() for x in v]
+        if got:
+            self.log.info(f"  ENTRY SLIPPAGE vs the price the backtest assumed "
+                          f"(n={len(got)}, edge>0 = favourable):")
+            for dname in ("SHORT", "LONG"):
+                rows = slips[dname]
+                if not rows:
+                    continue
+                edges = sorted(r[4] for r in rows)
+                med = edges[len(edges) // 2]
+                p90 = edges[min(len(edges) - 1, int(0.9 * len(edges)))]
+                self.log.info(f"    {dname} n={len(rows)} median_edge={med*100:+.3f}% "
+                              f"p90_edge={p90*100:+.3f}% "
+                              f"mean={sum(edges)/len(edges)*100:+.3f}%")
+                for sym, intended, fill, slip, edge in rows[:10]:
+                    self.log.info(f"      {sym} intended={intended} filled={fill} "
+                                  f"slip={slip*100:+.3f}% edge={edge*100:+.3f}%")
+        else:
+            self.log.warning("  ENTRY SLIPPAGE: not measurable - no fill price "
+                             "could be recovered from the OnFill args. The raw "
+                             "args are in this log; use them to fix the field "
+                             "index in _note_fill.")
         try:
             import json as _j
             p = Path(self.config.log_dir) / f"exec_report_{datetime.now().strftime('%Y%m%d')}.json"
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(_j.dumps({"stats": {k: v for k, v in st.items() if k != "acks"},
-                                   "fills": {k: [x - (t_open or x) for x in v] for k, v in self.fill_events.items()}},
+                                   "fills": {k: [x - (t_open or x) for x in v] for k, v in self.fill_events.items()},
+                                   "fill_prices": self.fill_prices,
+                                   "fill_raw": {k: v[:3] for k, v in self.fill_raw.items()}},
                                   default=str, indent=1), encoding="utf-8")
             self.log.info(f"  saved {p}")
         except Exception as e:
