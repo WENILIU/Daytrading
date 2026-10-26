@@ -345,19 +345,33 @@ def get_restricted_stocks() -> set:
     return restricted
 
 
-def get_borrowable_stocks() -> set | None:
-    """Get stocks eligible for short-selling (securities lending available).
-    Returns None if data unavailable (skip filter)."""
+def get_borrowable_stocks() -> tuple:
+    """Codes that can actually be shorted today = lending quota > 0 in the most
+    recent published session (T-1).
+
+    Source: finlab `security_lending_sell:借券賣出限額` (TWSE 借券賣出限額, published
+    21:26-23:26 the night before, so the T-1 row is the newest one at 09:00 and
+    using it is not look-ahead).
+
+    Measured 2026-10-27 against the exchange's own announcement
+    `sellable_lending_quota:可借券賣出股數` over the 92 days where both exist:
+    T-1 quota vs same-day announcement agree 100.00% (2 disagreements / 195,500).
+    The previous source `etl:lending_fee_volume` only says a stock has been
+    borrowed at some point since 2015 - it cannot answer "is there stock today".
+
+    Returns (codes, as_of_date) or (None, reason).
+    """
+    if not _ensure_finlab_login():
+        return None, "finlab login unavailable"
     try:
         from finlab import data as fdata
-        lfv = fdata.get('etl:lending_fee_volume')
-        borrowable = set()
-        for stock in lfv.columns:
-            if (lfv[stock] > 0).any():
-                borrowable.add(stock)
-        return borrowable
-    except Exception:
-        return None
+        q = pd.DataFrame(fdata.get('security_lending_sell:借券賣出限額'))
+        if len(q) == 0:
+            return None, "empty lending quota panel"
+        row = q.iloc[-1]
+        return {str(c) for c in row[row > 0].index}, str(pd.Timestamp(q.index[-1]).date())
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"[:120]
 
 
 
@@ -924,9 +938,13 @@ class GapFadeAutoTrader:
 
         # Load restricted stocks
         self.restricted_stocks = get_restricted_stocks()
-        self.borrowable_stocks = get_borrowable_stocks()
-        if self.borrowable_stocks:
-            self.log.info(f"  Borrowable stocks: {len(self.borrowable_stocks)}")
+        self.borrowable_stocks, self._borrow_asof = get_borrowable_stocks()
+        if self.borrowable_stocks is not None:
+            self.log.info(f"  Borrowable (T-1 lending quota, as-of {self._borrow_asof}): "
+                          f"{len(self.borrowable_stocks)} codes")
+        else:
+            self.log.warning(f"  LENDING QUOTA UNAVAILABLE ({self._borrow_asof}) "
+                             f"- SHORT leg unverified, no filter applied")
         if self.restricted_stocks:
             self.log.info(f"  Loaded {len(self.restricted_stocks)} restricted stocks")
 
@@ -1020,11 +1038,6 @@ class GapFadeAutoTrader:
                 if stock_no in self.restricted_stocks:
                     continue
 
-                # Skip non-borrowable stocks (cannot short-sell)
-                if self.borrowable_stocks is not None and stock_no not in self.borrowable_stocks:
-                    self._nb_reject += 1
-                    continue
-
                 # Calculate gap
                 raw_gap = (open_price - prev_close) / prev_close
 
@@ -1071,6 +1084,13 @@ class GapFadeAutoTrader:
             if direction is None:
                 continue
 
+            # Only SHORT needs a stock borrow. LONG is 現股買 and must not be
+            # filtered here - that was a bug: it dropped valid LONG signals.
+            if direction == Direction.SHORT and self.borrowable_stocks is not None \
+                    and c["symbol"] not in self.borrowable_stocks:
+                self._nb_reject += 1
+                continue
+
             signals.append(Signal(
                 symbol=c["symbol"], name=c["name"],
                 direction=direction, open_price=c["openPrice"],
@@ -1092,9 +1112,9 @@ class GapFadeAutoTrader:
         n_locked = sum(1 for s in signals if s.is_at_limit)
         self.log.info(f"  Opening-locked (excluded by v13): {n_locked}")
         if self.borrowable_stocks is None:
-            self.log.warning("  Borrowable list UNAVAILABLE - SHORT leg unverified (pre-live risk #2)")
+            self.log.warning("  SHORT leg NOT filtered for lending quota (see above)")
         else:
-            self.log.info(f"  Rejected for no-borrowable: {self._nb_reject}")
+            self.log.info(f"  Rejected SHORT for no lending quota (T-1): {self._nb_reject}")
 
 
         # v13: model scoring + pred_q filter. NO top-N cap, NO gap-size ranking.

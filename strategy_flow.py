@@ -82,7 +82,7 @@ y = box(C[0], y, W, 12.6, "1. 更新因子面板",
  BLUE, BLUE_E)
 y = note(C[0], y, "沒更新 → 同一引擎實測\n2023-25 從 1692% 掉到 260%\n這是整條流程最大的單一風險", RED_E)
 y = box(C[0], y, W, 12.0, "2. 載入三個狀態檔",
- "模型 v13_model.pkl（逐年重訓）\n處置股清單：finlab disposal_information\n淨值 equity_state.json（回撤剎車用）",
+ "模型 v13_model.pkl（逐年重訓）\n處置股清單 + 借券額度（皆 finlab，取 T-1）\n淨值 equity_state.json（回撤剎車用）",
  BLUE, BLUE_E)
 y = box(C[0], y, W, 11.0, "3. 開盤前最後確認",
  "處置股一定要是 finlab 給的\n面板 lag <= 10 天\n淨值不能是模擬留下的舊值",
@@ -116,10 +116,10 @@ y = box(C[1], y, W, 9.0, "訊號條件",
  GREEN, GREEN_E, fs=8.0)
 arrow(C[1], y + 2.0, y + 0.3)
 y = box(C[1], y, W, 10.0, "最後再排掉不能交易的",
- "開盤鎖死漲/跌停（進場會被鎖住）\n股價 < 30 元（價差太大、流動性差）\n無可借券（放空借不到券）",
+ "開盤鎖死漲/跌停（進場會被鎖住）\n股價 < 30 元（價差太大、流動性差）\n放空：T-1 借券額度 = 0 → 排除\n（做多是現股買，不需要借券）",
  GREEN, GREEN_E, fs=8.0)
-y = box(C[1], y, W, 15.6, "對應的 log 行",
- "Pre-open trim: dropped A turnover,\n  B disposal, kept 905\nScan via Fugle (TWSE+TPEx): 905 in 0.3s\nCOVERAGE: full universe answered\n  (TPEx rows in feed: 851)\nMarket gap (0050 open, v13 def): +0.42%\nOpening-locked (excluded): N\nRejected for no-borrowable: N",
+y = box(C[1], y, W, 17.2, "對應的 log 行",
+ "Pre-open trim: dropped A turnover,\n  B disposal, kept 905\nScan via Fugle (TWSE+TPEx): 905 in 0.3s\nCOVERAGE: full universe answered\n  (TPEx rows in feed: 851)\nMarket gap (0050 open, v13 def): +0.42%\nOpening-locked (excluded): N\nRejected SHORT for no lending quota\n  (T-1): N",
  LOGC, LOG_E, fs=7.4)
 y = box(C[1], y, W, 12.2, "看到這些就是壞了",
  "falling back to TWSE MIS → 上櫃看不到\nTPEx rows 掉到 0 → 同上\nFALLBACK (7 large caps, NOT v13 def)\n  → 基準換了，當天訊號不可比",
