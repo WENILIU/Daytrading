@@ -411,6 +411,18 @@ class Config:
     dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
     dd_th2 = 0.012; dd_scale2 = 0.12   # equity DD > 1.2 pct  -> x0.12
     k_model_scale = 0.02            # k_model = clip(0.5 + pred/0.02, 0, 2)
+    # k_model is OFF by default. Measured on the corrected universe (2026-10-27):
+    # it adds no return (CAGR 167.8% vs 167.3%) and worsens MDD (-4.34% vs -4.59%),
+    # and because it scales with the RAW magnitude of pred it is the single biggest
+    # source of run-to-run instability - a 0.28% change in the training pool moved
+    # the reported CAGR by ~16pp. k_trail stays ON: removing it costs 73pp of CAGR
+    # and takes MDD from -4.3% to -12.8%.
+    use_k_model = False
+    # Skip designs too small to buy a whole lot. At 4,500,000 TWD a 0.4% design
+    # weight is 18,000 TWD, which cannot be bought for any stock above 18 TWD, so
+    # those rows only inflate the intended trade count. Dropping them raises the
+    # realised share of the design from 60% to 70% and improves Calmar (49.7->50.8).
+    min_pos_pct = 0.005
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1584,13 +1596,16 @@ class GapFadeAutoTrader:
             else:
                 dd_scale = 1.0
 
-            k_model = min(2.0, max(0.0, 0.5 + sig.pred / self.config.k_model_scale))
+            k_model = (min(2.0, max(0.0, 0.5 + sig.pred / self.config.k_model_scale))
+                       if self.config.use_k_model else 1.0)
             t30 = self._trail30(sig.direction.value)
             k_trail = min(2.0, max(0.3, 0.5 + t30 / self.config.k_trail_scale))
 
             pos_pct = min(sig.base_pos * self.config.position_multiplier * zt_mult
                           * dd_scale * k_model * k_trail, self.config.pos_cap_pct)
-            if pos_pct <= 0:
+            if pos_pct < self.config.min_pos_pct:
+                self.log.info(f"  {sig.symbol}: pos {pos_pct*100:.2f}% < min "
+                              f"{self.config.min_pos_pct*100:.1f}%, SKIP (cannot fill 1 zhang)")
                 continue
             sig._pos_pct = pos_pct
             sig.tier = f"q{sig.pred_q:.2f}/zt{zt_mult:.1f}/dd{dd_scale:.2f}/km{k_model:.1f}/kt{k_trail:.1f}"

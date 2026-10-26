@@ -22,12 +22,16 @@ def tsz(p):
     if p<1000: return 1.0
     if p<5000: return 5.0
     return 10.0
-t=np.vectorize(tsz)(pc); LU=np.floor(pc*1.10/t)*t; LD=np.ceil(pc*0.90/t)*t
+t=np.vectorize(tsz)(pc)
+# round to the tick decimals: floor(44.0*1.10/0.1)*0.1 evaluates to 48.400000000000006,
+# which made the opening-lock test below compare 48.40 < 48.400000000000006 and let
+# locked-limit-up opens into the universe. The live script rounds its limits (gap_fade_auto
+LU=np.round(np.floor(pc*1.10/t)*t,4); LD=np.round(np.ceil(pc*0.90/t)*t,4)
 TK=np.vectorize(tsz)(OP)
 A=np.abs(adj); short=adj>0
 ztd=np.where(short,(LU-OP)/np.where(OP==0,1,OP),(OP-LD)/np.where(OP==0,1,OP))
 base=(A>=0.015)&(OP>=30)&(ptv>=1e7)&np.isfinite(pc)&np.isfinite(OP)&(ztd>0)
-base&= ~((OP>=LU)|(OP<=LD))
+base&= ~((OP>=LU-1e-6)|(OP<=LD+1e-6))  # tolerance: an open AT the limit is locked, not tradeable
 base&= np.where(short, A>=0.015, A>=0.05)
 DP=pd.read_pickle("disposal_panel_full.pkl"); DP["stock"]=DP["stock"].astype(str)
 smap={s:i for i,s in enumerate(stocks)}; dmap={d:i for i,d in enumerate(cal)}
