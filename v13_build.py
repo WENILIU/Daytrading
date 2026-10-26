@@ -1,6 +1,7 @@
 import pandas as pd, numpy as np, pickle, time, warnings; warnings.filterwarnings("ignore")
 t0=time.time()
 from finlab import data
+BORROW_FILTER=True  # SHORT must have a lending quota at T-1. Set False to reproduce the pre-2026-10-27 numbers.
 op=data.get("price:開盤價"); hp=data.get("price:最高價"); lp=data.get("price:最低價"); cp=data.get("price:收盤價"); tv=data.get("price:成交金額")
 stocks=op.columns.astype(str); cal=pd.DatetimeIndex(sorted(op.index))
 # market opening gap from 0050 (observable at 09:00)
@@ -34,6 +35,26 @@ DP["si"]=DP["stock"].map(smap); DP["di"]=DP["date"].map(dmap)
 dd=DP.dropna(subset=["si","di"])
 disp=np.zeros(OP.shape,bool); disp[dd["di"].astype(int).values,dd["si"].astype(int).values]=True
 base&= ~disp
+n0=int(base.sum())
+if BORROW_FILTER:
+    # SHORT needs a stock borrow; LONG is 現股買 and must not be filtered here.
+    # TWSE 借券賣出限額 is published 21:26-23:26, so at 09:00 the newest row is T-1
+    # -> using T-1 is not look-ahead. Cross-checked against the exchange's own
+    # sellable_lending_quota:可借券賣出股數 over the 92 overlapping days: the T-1
+    # quota agrees 100.00% with the same-day announcement (2 disagreements/195,500).
+    # Codes absent from the panel count as NOT borrowable - that is what the live
+    # script does, and it is the conservative choice. Measured cost of this filter:
+    # CAGR 203.0%->180.9%, MDD -4.32%->-5.06%.
+    # Filtering here (not after) is deliberate: stock_signals_30d / signals_today are
+    # computed from this universe below, and the live script only ever counts signals
+    # that passed the same filters.
+    LQ=pd.DataFrame(data.get("security_lending_sell:借券賣出限額"))
+    LQ.index=pd.DatetimeIndex(pd.to_datetime(LQ.index))
+    LQ.columns=[str(c) for c in LQ.columns]
+    LQ=LQ.reindex(index=cal,columns=stocks).shift(1)
+    can=LQ.values>0  # NaN>0 is False -> absent from the panel = not borrowable
+    base&= np.where(short,can,True)
+    print("lending quota (T-1, SHORT only): dropped",n0-int(base.sum()),"rows",flush=True)
 print("universe rows:",int(base.sum()),flush=True)
 ri,ci=np.nonzero(base)
 out=pd.DataFrame({

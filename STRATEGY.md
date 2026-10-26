@@ -125,6 +125,7 @@ v13 的做法是**換到幾乎沒有漲停問題的戰場**（1.5-3% 區間觸�
 | 處置股 | 主線 finlab `disposal_information`（上市+上櫃；實測為交易所公告頁的嚴格超集，14 vs 9，漏的 5 檔查證均為有效處置）。退路只在 finlab 不可用時走，且一律大聲報警 |
 | 借券額度 | finlab `security_lending_sell:借券賣出限額`，取**最新一列（= T-1）**。該資料 21:26–23:26 發布，所以 09:00 用 T-1 不是前視。日誌會印 `Borrowable (T-1 lending quota, as-of <date>): N codes`，as-of 不是上一個交易日就是沒更新 |
 | 模型 | `v13_model.pkl` 每年年底重訓（`v13_export_model.py`，PROD_YEAR 遞增） |
+| 訊號產生 | `v13_build.py` 已內含借券過濾（`BORROW_FILTER=True`，實測丟掉 31,044/234,844 筆，全部是 SHORT，LONG 一筆都沒動）。⚠️ 但 repo 裡現行的 `signals_v13.pkl`／`v13_model.pkl` 仍是**過濾前** universe 產出的，所以上面引用的績效還是過濾前训練的模型。要讓模型也貼合實盤需重跑 `v13_build.py → v13_train.py → v13_export_model.py`。設 `BORROW_FILTER=False` 可重現 203% 那組數字 |
 | 資金 | 450 萬、整張、零融資（總名義 ≤ 淨值） |
 
 ## 4. 上實盤前的三項風險（`v13_live_risk.py`）
