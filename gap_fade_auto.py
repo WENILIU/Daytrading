@@ -1447,6 +1447,16 @@ class GapFadeAutoTrader:
                     "y": q.get("previousClose"),
                     "v": vol,
                     "x": q.get("exchange", ""),
+                    # RISK1 needs both of these. `date` says which session the
+                    # feed is on (it keeps answering with the last trading day
+                    # when today is closed), and `openTime` is the exchange
+                    # opening print in microseconds epoch - measured 2026-10-22
+                    # 2330 openTime = 09:00:08.980736, i.e. the opening price
+                    # of the most liquid stock in the market was not printable
+                    # at 09:00:00.000. TWSE MIS has neither, so the fallback
+                    # path reports 0 and says so.
+                    "d": q.get("date", ""),
+                    "ot": q.get("openTime") or 0,
                 })
         return rows
 
@@ -2644,25 +2654,84 @@ if __name__ == "__main__":
         print(f"  Capital: {config.capital:,.0f}")
         trader = GapFadeSimulator(config)
     elif mode == "scan":
-        print("SCAN SPEED TEST - full-market quote scan only, NO orders")
+        print("SCAN / RISK1 - full-market quote scan only, NO orders")
+        print("  Polls until 09:01:00 and reports when opening prices actually")
+        print("  become visible, and what the exchange says the opening print time was.")
         trader = GapFadeSimulator(config)
         trader.connect()
         codes = trader._load_stock_list()
         print(f"  Universe: {len(codes)} codes")
-        for trial in range(3):
+
+        import datetime as _dt
+        today_s = _dt.date.today().isoformat()
+        open_dt = _dt.datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        stop_at = open_dt + _dt.timedelta(seconds=60)
+        if _dt.datetime.now() >= stop_at:
+            stop_at = _dt.datetime.now() + _dt.timedelta(seconds=6)
+
+        first_visible = None
+        earliest_open = {}
+        dated = 0
+        trial = 0
+        while True:
+            trial += 1
             t0 = time.time()
             rows, source = trader._batch_scan(codes)
-            dt = time.time() - t0
+            took = time.time() - t0
             named = [r for r in rows if r.get("n")]
-            with_open = sum(1 for r in named if _to_float(r.get("o")) > 0)
-            with_ref = sum(1 for r in named if _to_float(r.get("y")) > 0)
             by_ex = {}
             for r in named:
                 by_ex[r.get("x") or "?"] = by_ex.get(r.get("x") or "?", 0) + 1
-            print("  scan#%d via %s: rows=%d has_open=%d has_prevclose=%d "
-                  "by_exchange=%s  %.2fs" % (trial + 1, source, len(named), with_open,
-                                             with_ref, by_ex, dt))
-            time.sleep(1)
+            dated = sum(1 for r in named if str(r.get("d")) == today_s)
+            with_open = sum(1 for r in named if _to_float(r.get("o")) > 0)
+            with_ot = 0
+            for r in named:
+                ot = _to_float(r.get("ot"))
+                if ot > 0:
+                    with_ot += 1
+                    earliest_open.setdefault(r["c"], ot)
+            if with_ot and first_visible is None:
+                first_visible = t0
+            print("  poll#%d %s via %s: rows=%d feed_today=%d has_open=%d "
+                  "has_openTime=%d by_exchange=%s %.2fs"
+                  % (trial, _dt.datetime.now().strftime("%H:%M:%S"), source,
+                     len(named), dated, with_open, with_ot, by_ex, took))
+            if _dt.datetime.now() >= stop_at:
+                break
+            time.sleep(2)
+
+        # The summary goes through the logger, not print(), so it lands in
+        # trading_logs/ and becomes a durable "RISK1 measured" marker - the
+        # 08:55 reminder checks for this line before nagging again.
+        log = trader.log
+        log.info("=" * 60)
+        if dated:
+            log.info(f"  FEED IS LIVE for {today_s} ({dated} codes on this session)")
+        else:
+            log.info(f"  FEED IS NOT ON {today_s} - the exchange has no session "
+                     f"for today. RISK1 cannot be measured; run this again on a "
+                     f"trading day.")
+        if not dated:
+            # The feed answers with the LAST trading session when today is
+            # closed, so openTime would be days old and the percentiles below
+            # would be large negatives. Refuse to report a made-up number.
+            log.info("  RISK1: not measured (no live session today).")
+        elif earliest_open:
+            lats = sorted(v / 1_000_000.0 - open_dt.timestamp()
+                          for v in earliest_open.values())
+            n = len(lats)
+            q = lambda p: lats[min(n - 1, int(p * n))]
+            log.info(f"  RISK1 exchange opening-print time, seconds after "
+                     f"09:00:00 (n={n}):")
+            log.info(f"    p50={q(0.5):.2f}s  p90={q(0.9):.2f}s  "
+                     f"p99={q(0.99):.2f}s  max={lats[-1]:.2f}s")
+            if first_visible:
+                log.info(f"  RISK1 first openPrice we could read: "
+                         f"{first_visible - open_dt.timestamp():.2f}s after "
+                         f"09:00:00")
+        else:
+            log.info("  RISK1: feed is live but carries no openTime field "
+                     "(TWSE MIS fallback). Re-run when Fugle answers.")
         sys.exit(0)
     elif mode == "now":
         print("NOW MODE - Immediate execution (no time wait, 30min monitor)")
