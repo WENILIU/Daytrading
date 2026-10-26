@@ -21,6 +21,13 @@ ap.add_argument("--since", default="2026-07-23")
 ap.add_argument("--until", default="2026-10-22")
 ap.add_argument("--capital", type=float, default=CAP0)
 ap.add_argument("--min-weight", type=float, default=0.005)
+ap.add_argument("--sizing", default="r6", choices=["r6", "floor"],
+                help="r6 = adopted live rule (cap per trade + skip coarse lots); "
+                     "floor = the old floor-only view reproduced from the engine")
+ap.add_argument("--max-per-trade", type=float, default=1_000_000)
+ap.add_argument("--max-lot-value", type=float, default=250_000)
+ap.add_argument("--max-dv1-frac", type=float, default=None,
+                    help="cap one trade at this fraction of the name's T-1 turnover")
 ap.add_argument("--min-range", type=float, default=0.001)
 ap.add_argument("--out", default=OUT)
 a = ap.parse_args()
@@ -40,6 +47,8 @@ import finlab
 from finlab import data as fdata
 tok = re.search(r'FINLAB_TOKEN = "([^"]+)"', open("gap_fade_auto.py", encoding="utf-8").read()).group(1)
 finlab.login(tok)
+# T-1 dollar turnover: the only impact proxy that exists at 09:00 (T is not traded yet)
+TO1 = pd.read_pickle(r"D:\gapfade_data\zt_turnover.pkl").shift(1)
 vol = pd.DataFrame(fdata.get("price:成交股數"))
 turn = pd.DataFrame(fdata.get("price:成交金額"))
 vol.index = pd.to_datetime(vol.index); turn.index = pd.to_datetime(turn.index)
@@ -50,6 +59,8 @@ DAYCTX = {str(pd.Timestamp(d).date()): (float(r["n_signals"]), float(r["cdd"]), 
                                         float(r["market_ret"]), float(r["A_pnl"]), float(r["C_pnl"]),
                                         float(r["A_expo"]), float(r["C_expo"]))
           for d, r in cv.iterrows()}
+
+cur_day = None; left = a.capital
 
 rows = []
 for _, r in A.iterrows():
@@ -67,18 +78,54 @@ for _, r in A.iterrows():
     ex_raw, _, _, gross_raw = exit_of(r["direction"], pr, float(r["day_high"]), float(r["day_low"]),
                                       float(r["day_close"]), lu, ld, tk, tpv)
     net = gross - 2 * COST
-    hit = placed.get((ds, code))
-    if hit is not None:
-        sh = float(hit["_shares"]); notional = float(hit["_notional"])
-        # the engine floors the design weight to whole lots; anything below that floor
-        # was cut by the day's remaining cash, which is what "縮量" is meant to flag
-        want = float(int(float(r["_weight"]) * a.capital / (pr * 1000)) * 1000)
-        status = "可下" if sh >= want - 1e-9 else "可下(縮量:當日現金已滿)"
-    else:
-        sh = 0.0; notional = 0.0
-        need = float(r["_weight"]) * a.capital; lot = pr * 1000
-        status = ("跳過:整張不足(需 %.1f 萬, 1張=%.1f 萬)" % (need / 1e4, lot / 1e4)
-                  if lot > need else "跳過:當日資金已滿")
+    # --- sizing: which lots this account would actually place ---
+    if ds != cur_day:
+        cur_day = ds; left = a.capital
+    lot = pr * 1000.0
+    # T-1 turnover must be resolved BEFORE sizing: the per-trade cap below uses it
+    dv1 = float(TO1.at[d, code]) if code in TO1.columns and d in TO1.index else np.nan
+    need = float(r["_weight"]) * a.capital
+    if a.sizing == "r6":
+        # R6 (adopted for live, see STRATEGY.md s2 sizing lab): cap the notional of a
+        # single trade, skip names whose 1-lot value is coarser than any sensible
+        # target, then floor to whole lots. Same rule as v13_sizing_lab.py rule R6.
+        if lot > a.max_lot_value:
+            sh = 0.0; notional = 0.0
+            status = "跳過:1張市值過高(1張=%.1f 萬 > %.1f 萬)" % (lot / 1e4, a.max_lot_value / 1e4)
+        else:
+            tgt = min(need, a.max_per_trade)
+            if a.max_dv1_frac is not None and np.isfinite(dv1) and dv1 > 0:
+                tgt = min(tgt, a.max_dv1_frac * dv1)
+            n = int(tgt // lot)
+            if n < 1:
+                sh = 0.0; notional = 0.0
+                status = "跳過:整張不足(需 %.1f 萬, 1張=%.1f 萬)" % (tgt / 1e4, lot / 1e4)
+            elif n * lot > left + 1e-9:
+                n = int(left // lot)
+                if n < 1:
+                    sh = 0.0; notional = 0.0
+                    status = "跳過:當日資金已滿"
+                else:
+                    sh = n * 1000.0; notional = sh * pr
+                    status = "可下(縮量:當日現金已滿)"
+            else:
+                sh = n * 1000.0; notional = sh * pr
+                status = "可下"
+            if sh > 0:
+                left -= notional
+    else:  # floor-only view: take whatever the engine C mode actually placed
+        hit = placed.get((ds, code))
+        if hit is not None:
+            sh = float(hit["_shares"]); notional = float(hit["_notional"])
+            # the engine floors the design weight to whole lots; anything below that floor
+            # was cut by the day's remaining cash, which is what "縮量" is meant to flag
+            want = float(int(float(r["_weight"]) * a.capital / (pr * 1000)) * 1000)
+            status = "可下" if sh >= want - 1e-9 else "可下(縮量:當日現金已滿)"
+        else:
+            sh = 0.0; notional = 0.0
+            need = float(r["_weight"]) * a.capital; lot = pr * 1000
+            status = ("跳過:整張不足(需 %.1f 萬, 1張=%.1f 萬)" % (need / 1e4, lot / 1e4)
+                      if lot > need else "跳過:當日資金已滿")
     dv = float(vol.at[d, code]) if code in vol.columns and d in vol.index else np.nan
     dto = float(turn.at[d, code]) if code in turn.columns and d in turn.index else np.nan
     ns, cdd, rs, mret, apnl, cpnl, aexpo, cexpo = DAYCTX.get(ds, (np.nan,) * 8)
@@ -111,6 +158,7 @@ for _, r in A.iterrows():
         "當日成交股數": dv, "當日成交額(萬)": round(dto / 1e4, 1) if np.isfinite(dto) else np.nan,
         "我占當日量%": round(sh / dv * 100, 3) if np.isfinite(dv) and dv > 0 and sh > 0 else np.nan,
         "我占當日額%": round(notional / dto * 100, 3) if np.isfinite(dto) and dto > 0 and sh > 0 else np.nan,
+        "我占T-1額%": round(notional / dv1 * 100, 3) if np.isfinite(dv1) and dv1 > 0 and sh > 0 else np.nan,
         "曾觸漲停": bool(r["day_high"] >= r["lu"] - 1e-9) if r["direction"] == "SHORT" else bool(r["day_low"] <= r["ld"] + 1e-9),
         "開盤鎖死": bool(r["entry"] >= r["lu"] - 1e-9) if r["direction"] == "SHORT" else bool(r["entry"] <= r["ld"] + 1e-9),
         "整天鎖死": bool(abs(float(r["day_high"]) - float(r["day_low"])) < 1e-9),
@@ -125,6 +173,7 @@ T["累計現金(元)"] = T["日期"].map(bal.round(0))
 os.makedirs(os.path.dirname(a.out), exist_ok=True)
 T.to_csv(a.out, index=False, encoding="utf-8-sig")
 ALL.to_csv(os.path.splitext(a.out)[0] + "_all_signals.csv", index=False, encoding="utf-8-sig")
+print("sizing rule:", a.sizing, " max_per_trade=%.0f  max_lot_value=%.0f" %      (a.max_per_trade, a.max_lot_value))
 print("wrote", a.out, len(T), "rows; and _all_signals.csv", len(ALL), "rows")
 print("開盤鎖死筆數(应为0):", int(ALL["開盤鎖死"].sum()), " 整天鎖死:", int(ALL["整天鎖死"].sum()))
 print("期間: %s ~ %s  筆數 %d  交易日 %d" % (T["日期"].min(), T["日期"].max(), len(T), T["日期"].nunique()))
@@ -137,14 +186,22 @@ d = T["盈虧(元)"] - T["盈虧(元)回測連續價"]
 print("價位需取整: %d / %d 筆 (%.1f%%)" % (int(T["價位需取整"].sum()), len(T), int(T["價位需取整"].sum()) / len(T) * 100))
 print("取整後 vs 回測連續價: 總損益差 %.0f 元 (%.4f%%)  最大單筆差 %.0f 元" %
       (d.sum(), d.sum() / T["盈虧(元)回測連續價"].sum() * 100, d.abs().max()))
-print("我占當日額百分比 最大 %.3f  中位 %.3f" % (T["我占當日額%"].max(), T["我占當日額%"].median()))
+print("我占當日額%% 最大 %.3f  中位 %.3f   |  我占T-1額%% 最大 %.1f  p95 %.2f  中位 %.3f" %
+      (T["我占當日額%"].max(), T["我占當日額%"].median(), T["我占T-1額%"].max(),
+       T["我占T-1額%"].quantile(0.95), T["我占T-1額%"].median()))
 print("單日最大虧 %.0f 元  單日最大賺 %.0f 元" % (day.min(), day.max()))
 skip = ALL[~ALL["狀態"].str.startswith("可下")]
 print("模型要的設計訊號 %d 筆；450 萬能下 %d 筆 (%.1f%%)，被跳過 %d 筆" %
       (len(ALL), len(T), len(T) / len(ALL) * 100, len(skip)))
-print("跳過原因: 整張不足 %d 筆, 當日資金已滿 %d 筆" %
-      (int(skip["狀態"].str.startswith("跳過:整張不足").sum()),
-       int(skip["狀態"].str.startswith("跳過:當日資金已滿").sum())))
+reasons = skip["狀態"].str.split("(").str[0].value_counts()
+print("跳過原因:", reasons.to_dict())
+print("單筆名義 最大 %.1f 萬  平均 %.1f 萬  (上限 %.1f 萬)" %
+      (T["成交金額(萬)"].max(), T["成交金額(萬)"].mean(), a.max_per_trade / 1e4))
+assert T["成交金額(萬)"].max() * 1e4 <= a.max_per_trade + 1e-6, "per-trade cap violated"
+if a.sizing == "r6":
+    bad = int((T["進場價"] * 1000 > a.max_lot_value).sum())
+    print("R6 檢查: 1張市值 > %.1f 萬 卻仍下單的筆數 = %d (应为 0)" % (a.max_lot_value / 1e4, bad))
+    assert bad == 0
 print("其中設計面(複利、無整張)會下的有 %d 筆 -> 450 萬與設計面的差距就是整張門檻造成的" %
       int(ALL["設計面有下"].sum()))
 mm = T.assign(m=T["日期"].str[:7]).groupby("m").agg(筆數=("盈虧(元)", "size"), 盈虧=("盈虧(元)", "sum"),

@@ -432,6 +432,12 @@ class Config:
     # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
     max_per_trade = 1_000_000
     max_lot_value = 250_000
+    # One order must not exceed this fraction of the name's T-1 turnover (0 = off).
+    # Measured 2026-10-27 (v13_sizing_lab R9/R10): 10 pct costs 4 pp of CAGR
+    # (155.4 -> 151.4) with MDD unchanged; 5 pct costs 10 pp. Adopted at 10 pct
+    # because the backtest prices assume zero impact and a 12 pct-of-turnover order
+    # does not fill at the quoted price.
+    max_dv1_frac = 0.10
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1628,6 +1634,7 @@ class GapFadeAutoTrader:
         total_exposure = 0
 
         skipped_at_limit = 0
+        skipped_impact_capped = 0
         skipped_lot_coarse = 0
 
         for sig in self.signals:
@@ -1679,9 +1686,22 @@ class GapFadeAutoTrader:
                 skipped_lot_coarse += 1
                 continue
             target_value = min(pos_pct * budget, self.config.max_per_trade)
+            # Impact cap: one order must not exceed 10 pct of the name's T-1 turnover.
+            # T's own turnover is unknown at 09:00, so T-1 is the only legal proxy.
+            # Measured (v13_sizing_lab R9): costs 4 pp of CAGR over 19 years but the
+            # worst order falls from 12.1 pct to 8.4 pct of the day's traded value,
+            # which is the part the backtest cannot model at all.
+            t1tv = float(getattr(sig, "prev_turnover", 0.0) or 0.0)
+            if self.config.max_dv1_frac and t1tv > 0:
+                target_value = min(target_value, self.config.max_dv1_frac * t1tv)
             shares = int(target_value / lot_value) * 1000
             if shares < 1000:
-                self.log.info(f"  {sig.symbol}: < 1 zhang after per-trade cap, SKIP")
+                if t1tv > 0 and self.config.max_dv1_frac and self.config.max_dv1_frac * t1tv < lot_value:
+                    skipped_impact_capped += 1
+                    self.log.info(f"  {sig.symbol}: 1 zhang > {self.config.max_dv1_frac*100:.0f}% of "
+                                  f"T-1 turnover ({self.config.max_dv1_frac*t1tv:,.0f}), SKIP")
+                else:
+                    self.log.info(f"  {sig.symbol}: < 1 zhang after per-trade cap, SKIP")
                 continue
 
             # Zero-margin hard cap: total notional <= equity (sequential, shrink to fit)
@@ -1725,6 +1745,9 @@ class GapFadeAutoTrader:
         self.exec_stats["t_submit_last"] = time.time()
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
+        if skipped_impact_capped:
+            self.log.info(f"  Skipped (1 zhang > {self.config.max_dv1_frac*100:.0f}% of T-1 turnover): "
+                          f"{skipped_impact_capped}")
         if skipped_lot_coarse:
             self.log.info(f"  Skipped (1 zhang value > {self.config.max_lot_value:,.0f}, lot too coarse): "
                           f"{skipped_lot_coarse}")
