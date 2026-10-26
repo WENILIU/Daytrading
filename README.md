@@ -23,12 +23,26 @@ v13 的兩個關鍵修正：
 | `STRATEGY.md` | 完整策略說明、參數、績效、衰退審計、實盤要求 |
 | `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|sim\|now]` |
 | `v13_live_risk.py` | 上實盤前三項風險量測（報價延遲／可借券／下單延遲） |
+| `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、尚未解決的涵蓋率問題 |
 | `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh` |
 | `v13_build.py` `v13_train.py` `v13_bt.py` | 回測宇宙、walk-forward 訓練、回測引擎 |
 | `v13_export_model.py` | 輸出可上線模型 `v13_model.pkl`（模型與分位池，未入 repo，需自行產生） |
 | `v13_decay.py` `v13_dstune.py` `v13_frontier.py` `v13_rawedge.py` `v13_ic.py` `v13_stale2.py` | 衰退歸因、槓桿前沿、模型健全度、因子延遲 |
 | `RESEARCH_v11_expansion.md` | 研究記錄：所有試過並被否決的方向與原因 |
 | `v13_final_report.txt` `v8_final_report.txt` | 逐年／逐月完整績效 |
+
+## ⚠️ 實盤目前只能做到一半
+
+`gap_fade_auto.py` 的掃描走 TWSE 公開 API，而**它只回答上市公司**：上櫃與 ETF 回空陣列，
+無聲地被漏掉。實測這佔掉 **45.9%** 的訊號。用同一支回測引擎比較：
+
+| 可交易範圍 | CAGR | MDD | Sharpe |
+|---|---|---|---|
+| 全部訊號 | 184.9% | −3.26% | 5.81 |
+| 僅上市（實盤現況） | 70.0% | −4.31% | 4.21 |
+
+所以 203% 是「兩個市場都能下單」的數字。補上上櫃報價來源之前，
+實盤請以 **CAGR ~70%** 預估。原因與三個可能的解法見 `LIVE_READINESS.md`。
 
 ## 快速開始
 

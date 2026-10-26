@@ -226,6 +226,45 @@ def calc_effective_sl(entry: float, prev_close: float, direction,
     return round(sl_price, 2), max(0.01, sl_pct)
 
 
+def _to_float(v) -> float:
+    """TWSE returns '-' for missing fields."""
+    try:
+        return float(str(v).replace(",", ""))
+    except Exception:
+        return 0.0
+
+
+def _parse_smart_key(message: str) -> str:
+    """Pull the 條件單號 (smart-order key) out of a SendStockStrategyDayTrade ack.
+
+    The ack looks like: 20261026,預約單已送出, 條件單號：27440222, 交易日:20261027
+    The key is what CancelTSStrategyOrderV1 needs, so keep it.
+    """
+    import re
+    m = re.search(r"條件單號[：:]\s*(\d+)", message)
+    return m.group(1) if m else ""
+
+
+def cancel_smart_order(order_lib, user_id: str, account: str, smart_key: str):
+    """Cancel one day-trade smart order. nTradeKind 11 = 當沖, nDeleteType 1 = 全部."""
+    if not smart_key:
+        return -1, "no smart key"
+    c = sk.CANCELSTRATEGYORDER()
+    c.bstrLogInID = user_id
+    c.bstrFullAccount = account
+    c.nMarket = 1
+    c.bstrParentSmartKey = smart_key
+    c.bstrSmartKey = smart_key
+    c.nTradeKind = 11
+    c.nDeleteType = 1
+    c.bstrSeqNo = ""
+    c.bstrOrderNo = ""
+    c.bstrSmartKeyOut = ""
+    c.bstrLongActionKey = ""
+    msg, code = order_lib.CancelTSStrategyOrderV1(user_id, c)
+    return code, str(msg)
+
+
 
 class PositionState(Enum):
     PENDING = "PENDING"
@@ -272,6 +311,8 @@ class Signal:
     submit_ts: float = 0.0
     ack_ts: float = 0.0
     ack_code: int = -999
+    ack_msg: str = ""
+    smart_key: str = ""
 
 
 
@@ -651,10 +692,28 @@ class GapFadeAutoTrader:
         # TWSE API batch scan
         t0 = time.time()
         self.exec_stats["t_scan"] = t0
-        self.exec_stats["t_open"] = self.exec_stats.get("t_open") or t0
+        self.exec_stats.setdefault("t_open", t0)
         raw_data = self._twse_batch_scan(stock_list)
         scan_time = time.time() - t0
         self.log.info(f"  TWSE scan: {len(raw_data)} quotes in {scan_time:.1f}s")
+
+        # Coverage check. TWSE MIS only answers for 上市; every 上櫃 / ETF code in
+        # the universe comes back empty, and the strategy loses roughly half its
+        # signals that way (measured: 44.6 pct 上櫃 + 3.3 pct ETF, and the
+        # 上市-only subset runs about 2.6x lower CAGR). Never let that happen
+        # silently.
+        seen = {str(it.get("c")) for it in raw_data if it.get("n")}
+        missing = [c for c in stock_list if c not in seen]
+        self.exec_stats["universe"] = len(stock_list)
+        self.exec_stats["quoted"] = len(seen)
+        self.exec_stats["unquoted"] = len(missing)
+        if missing:
+            self.log.warning(
+                f"  COVERAGE: {len(missing)}/{len(stock_list)} codes returned no quote "
+                f"({len(missing)/len(stock_list)*100:.0f}%). These are 上櫃/ETF - "
+                f"the TWSE feed does not carry them. "
+                f"Sample: {','.join(missing[:8])}")
+        self.exec_stats["scan_seconds"] = scan_time
 
         # Process: filter + gap detection
         total_valid = 0
@@ -1352,6 +1411,16 @@ class GapFadeAutoTrader:
                 fills.append(min(ts) - t_open)
         self.log.info("=" * 60)
         self.log.info("EXECUTION RISK REPORT")
+        if st.get("quote_latency_s") is not None:
+            self.log.info(f"  RISK1 opening price visible: {st['quote_latency_s']:.2f}s after 09:00:00")
+        if st.get("t_scan_done") and t_open:
+            self.log.info(f"  RISK1 scan finished: {st['t_scan_done']-t_open:.2f}s after 09:00:00 "
+                          f"(scan itself took {st.get('scan_seconds', 0):.1f}s)")
+        if st.get("universe"):
+            miss = st.get("unquoted", 0)
+            self.log.info(f"  MARKET COVERAGE: {st['quoted']}/{st['universe']} codes answered, "
+                          f"{miss} silent (上櫃/ETF, not on the TWSE feed) = "
+                          f"{miss/st['universe']*100:.0f}% of the universe not traded")
         if lat:
             lat_s = sorted(lat)
             self.log.info(f"  submit->ack  n={len(lat)} median={lat_s[len(lat_s)//2]*1000:.0f}ms "
@@ -1382,40 +1451,68 @@ class GapFadeAutoTrader:
             self.log.warning(f"  exec report save failed: {e}")
 
     def _place_entry_order(self, sig: Signal):
-        """Place Smart Trade order (entry + SL + TP + ForceClose in one shot)"""
+        """Place one Smart Trade day-trade order: entry + SL + TP + time clear.
+
+        Field semantics come from the Capital manual
+        (6.下單-證券智慧單.docx, struct STOCKSTRATEGYORDER / 證券當沖):
+          nQty                = 委託張數, NOT share count (1 張 = 1000 股)
+          nBuySell            = 0:現股買 / 1:無券賣出
+          nRDOSLPercent = 0   -> stop loss fires on an absolute price (bstrSLTrigger)
+          nRDOTPPercent = 0   -> take profit fires on an absolute price (bstrTPTrigger)
+          bstrClearCancelTime = hhmm, the host accepts at most 13:20
+        The absolute-price stop is what makes the live order match the backtest:
+        calc_effective_sl() already caps the stop at 漲停 - 1 tick, and a
+        percentage stop could never fire once the stock is pinned at 漲停.
+        """
         oOrder = sk.STOCKSTRATEGYORDER()
         oOrder.bstrFullAccount = self.account
         oOrder.bstrStockNo = sig.symbol
-        oOrder.nQty = sig.shares
+        oOrder.nQty = max(1, int(sig.shares) // 1000)   # 張數
         oOrder.bstrOrderPrice = str(sig.entry_price)
-        oOrder.nOrderPriceType = 2  # LIMIT
+        oOrder.nOrderPriceType = 2                      # LIMIT
+        oOrder.nOrderPriceCond = 0                      # ROD
 
-        # Buy/Sell: 0=現股買, 1=無券賣出(short)
-        if sig.direction == Direction.SHORT:
-            oOrder.nBuySell = 1     # 無券賣出 (short sell)
-        else:
-            oOrder.nBuySell = 0     # 現股買進
+        # Buy/Sell: 0=現股買, 1=無券賣出 (no lending fee on this account)
+        oOrder.nBuySell = 1 if sig.direction == Direction.SHORT else 0
 
-        # Stop Loss (percentage-based, auto-triggered by exchange)
+        # Entry is a plain limit, not an MIT trigger
+        oOrder.nInnerOrderIsMIT = 0
+        oOrder.nMITDir = 0
+        oOrder.bstrMITTriggerPrice = "0"
+        oOrder.bstrMITDealPrice = "0"
+
+        # Stop loss on an absolute price (already capped by the price limit)
         oOrder.nStopLossFlag = 1
-        oOrder.nRDOSLPercent = 1
-        oOrder.bstrSLPercent = str(round(getattr(sig, "_sl_pct", self.config.stop_loss_pct) * 100, 1))
-        oOrder.nRDSLMarketPriceType = 1  # 市價觸發
+        oOrder.nRDOSLPercent = 0
+        oOrder.bstrSLTrigger = str(sig.sl_price)
+        oOrder.bstrSLPercent = "0"
+        oOrder.bstrSLOrderPrice = "0"
+        oOrder.nRDSLMarketPriceType = 1                 # market order once triggered
+        oOrder.nStopLossOrderCond = 0
 
-        # Take Profit (percentage-based)
+        # Take profit on an absolute price
         oOrder.nTakeProfitFlag = 1
-        oOrder.nRDOTPPercent = 1
-        oOrder.bstrTPPercent = str(int(getattr(sig, "_tp_pct", self.config.take_profit_pct) * 100))
-        oOrder.nRDTPMarketPriceType = 1  # 市價觸發
+        oOrder.nRDOTPPercent = 0
+        oOrder.bstrTPTrigger = str(sig.tp_price)
+        oOrder.bstrTPPercent = "0"
+        oOrder.bstrTPOrderPrice = "0"
+        oOrder.nRDTPMarketPriceType = 1                 # market order once triggered
+        oOrder.nTakeProfitOrderCond = 0
 
-        # Force close at 13:25
+        # Time clear. The host rejects anything later than 13:20, and only a
+        # market order guarantees the position is flat before the close.
         oOrder.nClearAllFlag = 1
-        oOrder.bstrClearCancelTime = "1325"
-        oOrder.nClearAllPriceType = 2  # limit price
-        oOrder.bstrClearAllOrderPrice = str(sig.entry_price)
+        oOrder.bstrClearCancelTime = "1320"
+        oOrder.nClearAllPriceType = 1                   # market
+        oOrder.bstrClearAllOrderPrice = "0"
+        oOrder.nClearOrderCond = 0
+        oOrder.nFinalClearFlag = 0
 
-        rec = {"symbol": sig.symbol, "direction": sig.direction.value, "shares": sig.shares,
-               "price": sig.entry_price, "pos_pct": round(getattr(sig, "_pos_pct", 0.0), 4),
+        zhang = oOrder.nQty
+        rec = {"symbol": sig.symbol, "direction": sig.direction.value,
+               "shares": sig.shares, "zhang": zhang,
+               "price": sig.entry_price, "sl": sig.sl_price, "tp": sig.tp_price,
+               "pos_pct": round(getattr(sig, "_pos_pct", 0.0), 4),
                "retries": 0, "ack_latency": None, "ack_code": None, "msg": ""}
         self.exec_stats.setdefault("orders", []).append(rec)
         self.exec_stats["t_submit_first"] = min(self.exec_stats.get("t_submit_first", time.time()), time.time())
@@ -1432,18 +1529,22 @@ class GapFadeAutoTrader:
             else:
                 self.log.error(f"  {sig.symbol}: Smart Trade exception - {e}")
             sig.state = PositionState.CANCELLED
+            rec["msg"] = str(e)[:200]
             return
 
         rec["ack_code"] = nCode
+        sig.ack_code = nCode
+        sig.ack_msg = str(bstrMessage)
         if nCode == 0:
             sig.order_seq = bstrMessage
+            sig.smart_key = _parse_smart_key(str(bstrMessage))
             sig.state = PositionState.FILLED
             self.active_positions[sig.symbol] = sig
             self.log.info(
-                f"  SMART ORDER: {sig.symbol} {sig.direction.value} {sig.shares} shares "
+                f"  SMART ORDER: {sig.symbol} {sig.direction.value} {zhang} 張 "
                 f"@ {sig.entry_price} [{sig.tier}] "
-                f"SL={self.config.stop_loss_pct*100:.0f}% TP={getattr(sig, '_tp_pct', self.config.take_profit_pct)*100:.0f}% "
-                f"ForceClose=13:25")
+                f"SL={sig.sl_price} TP={sig.tp_price} clear=13:20 "
+                f"key={sig.smart_key}")
         else:
             msg = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)
             rec["msg"] = str(msg)
@@ -1512,6 +1613,32 @@ class GapFadeAutoTrader:
 
         # Final force close check
         self._force_close_all()
+        self._cancel_open_smart_orders()
+
+    def _cancel_open_smart_orders(self):
+        """Drop any smart order still armed at the end of the session.
+
+        The host keeps a day-trade smart order until its 13:20 clear, so anything
+        still armed here is either already filled-and-exited or never filled.
+        Leaving it armed is how orphan orders show up in the App the next day.
+        """
+        if not getattr(self, "m_pSKOrder", None):
+            return
+        n = 0
+        for sig in self.active_positions.values():
+            if not getattr(sig, "smart_key", ""):
+                continue
+            if sig.exit_reason in ("MANUAL", "CANCELLED"):
+                continue
+            try:
+                code, msg = cancel_smart_order(self.m_pSKOrder, self.user_id,
+                                               self.account, sig.smart_key)
+                self.log.info(f"  cancel smart {sig.symbol} key={sig.smart_key} -> {code} {msg}")
+                n += 1 if code == 0 else 0
+            except Exception as e:
+                self.log.warning(f"  cancel smart {sig.symbol} failed: {str(e)[:150]}")
+        if n:
+            self.log.info(f"  Cancelled {n} smart order(s)")
 
     def _mark_exit(self, sig: Signal, price: float, reason: str):
         """Mark a position as exited for reporting (exchange already executed it)"""
@@ -1699,8 +1826,12 @@ class GapFadeAutoTrader:
         try:
             self.connect()
             self._wait_until("09:00")
+            # Anchor every latency measurement to the real 09:00:00, not to the
+            # moment the scan happens to start.
+            self.exec_stats["t_open"] = self._parse_time("09:00").timestamp()
             self._wait_for_quotes(min_stocks=200, timeout_sec=10)
             self.scan_signals()
+            self.exec_stats["t_scan_done"] = time.time()
 
             if not self.signals:
                 self.log.info("No signals. Done.")
@@ -1739,17 +1870,37 @@ class GapFadeAutoTrader:
             time.sleep(min(10, max(1, remaining)))
 
     def _wait_for_quotes(self, min_stocks: int = 200, timeout_sec: int = 10):
-        """Wait until enough stocks have valid opening prices in local memory."""
+        """Block until the scanner's own feed exposes opening prices.
+
+        This used to poll SKQuoteLib, which fills in at a different speed than
+        the TWSE API the scanner actually reads, so it gave a misleading answer.
+        Probing the same source is also the only way to measure the one thing the
+        backtest cannot know: how many seconds after 09:00:00 the first usable
+        opening price is visible (RISK 1).
+        """
+        probe = self._load_stock_list()[:100]
+        t_open = self.exec_stats.get("t_open") or time.time()
         deadline = time.time() + timeout_sec
+        need = max(1, int(len(probe) * 0.9))
+        got = 0
         while time.time() < deadline:
-            count = self._count_valid_quotes()
-            if count >= min_stocks:
-                self.log.info(f"  Quotes ready: {count} stocks with valid prices")
+            rows = self._twse_batch_scan(probe)
+            got = sum(1 for r in rows
+                      if _to_float(r.get("o")) > 0 and _to_float(r.get("y")) > 0)
+            if got >= need:
+                lat = time.time() - t_open
+                self.exec_stats["t_quotes_ready"] = time.time()
+                self.exec_stats["quote_latency_s"] = lat
+                self.log.info(f"  Quotes ready: {got}/{len(probe)} opening prices, "
+                              f"{lat:.2f}s after market open")
                 return
-            self.log.info(f"  Waiting for quotes... ({count}/{min_stocks})")
-            time.sleep(1)
-        count = self._count_valid_quotes()
-        self.log.warning(f"  Timeout: proceeding with {count} valid quotes")
+            self.log.info(f"  Waiting for quotes... ({got}/{need})")
+            time.sleep(0.5)
+        lat = time.time() - t_open
+        self.exec_stats["t_quotes_ready"] = time.time()
+        self.exec_stats["quote_latency_s"] = lat
+        self.log.warning(f"  Timeout: only {got}/{need} opening prices visible "
+                         f"{lat:.2f}s after market open")
 
     def _count_valid_quotes(self) -> int:
         """Quick count of stocks with valid open prices in local memory."""

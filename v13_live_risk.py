@@ -143,8 +143,15 @@ def risk_borrow():
 
 
 # ---------------------------------------------------------------- RISK 3
-def risk_orders():
-    """Submit non-filling test orders (limit at the down side) and time the ack."""
+def risk_orders(n_probe=6):
+    """Time the PRODUCTION order path: SendStockStrategyDayTrade, exactly as the
+    live trader calls it, then cancel through CancelTSStrategyOrderV1.
+
+    Test orders are 1 張 bought at the day's down-limit price, so they are valid
+    (the exchange accepts them) but cannot fill unless the stock hits 跌停.
+    A plain SendStockOrder is rejected with code 999 on this account, so measuring
+    it would tell us nothing about the real pipeline.
+    """
     import gap_fade_auto as G
     cfg = G.Config()
     tr = G.GapFadeAutoTrader(cfg)
@@ -154,45 +161,104 @@ def risk_orders():
         print(f"[RISK3] cannot connect to SKCOM now ({str(e)[:150]}) - run during market hours")
         R["risk3"] = {"error": str(e)[:300]}
         return
-    lat, seqs = [], []
+    lat, keys = [], []
     try:
-        for code, px in (("2330", 1.0), ("2454", 1.0), ("2317", 1.0)):
-            o = tr.m_pSKOrder
-            oo = None
-            import sk  # SKCOM types come from the trader module
-            oo = sk.STOCKORDER()
-            oo.bstrFullAccount = tr.account
-            oo.bstrStockNo = code
-            oo.bstrBuySell = "0"
-            oo.nQty = 500
-            oo.bstrPrice = str(px)      # absurdly low -> never fills
-            oo.bstrOrderType = "KS"
-            t = time.time()
-            msg, code_ret = o.SendStockOrder(tr.user_id, oo)
-            dt = time.time() - t
+        import requests
+        API = "http://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+        sess = requests.Session(); sess.headers["User-Agent"] = "Mozilla/5.0"
+        watch = [l.strip() for l in (OUT / "valid_stocks.txt").read_text().split() if l.strip()]
+        probe = [c for c in watch if c.isdigit()][:0]
+        codes = ["2330", "2454", "2317", "2303", "2324", "2412", "2357", "3711"][:n_probe]
+        for code in codes:
+            r = sess.get(f"{API}?ex_ch=tse_{code}.tw&_={int(time.time()*1000)}", timeout=8)
+            t = r.text; m = json.loads(t[t.find("{"):]).get("msgArray", [])[0]
+            prev = float(m["y"])
+            last = float(m.get("z") or m.get("o") or 0)
+            ld = G.calc_price_limits(prev)[1]
+            if not last or last <= ld * 1.02:
+                print(f"  skip {code}: last={last} too close to the down limit {ld}")
+                continue
+            sig = G.Signal(symbol=code, name="PROBE", direction=G.Direction.LONG,
+                           open_price=last, prev_close=prev, raw_gap=0.0, adj_gap=0.0)
+            sig.shares = 1000                       # exactly 1 張
+            sig.entry_price = ld
+            sig.sl_price, sig._sl_pct = G.calc_effective_sl(
+                ld, prev, G.Direction.LONG, cfg.stop_loss_pct)
+            sig.tp_price = round(ld * 1.05, 2)
+            sig._tp_pct = 0.05
+            t0 = time.time()
+            tr._place_entry_order(sig)
+            dt = time.time() - t0
             lat.append(dt)
-            seqs.append((code, msg, code_ret))
-            print(f"  submit {code} x500 @ {px}: ack {dt*1000:.0f}ms code={code_ret}")
+            keys.append((code, sig.smart_key, sig.ack_code))
+            print(f"  {code} 1 張 @ {ld} (last {last}): ack {dt*1000:.0f}ms "
+                  f"code={sig.ack_code} key={sig.smart_key}")
     except Exception as e:
-        print(f"  order probe failed: {str(e)[:200]}")
+        print(f"  order probe failed: {str(e)[:250]}")
     finally:
-        try:
-            for code, msg, cr in seqs:
-                if cr == 0:
-                    tr.cancel_order(msg, code)
-        except Exception:
-            pass
+        ok = [k for k in keys if k[1]]
+        cancelled, fail = 0, None
+        for code, key, _ in ok:
+            try:
+                c, msg = G.cancel_smart_order(tr.m_pSKOrder, tr.user_id, tr.account, key)
+                cancelled += 1 if c == 0 else 0
+                if c != 0:
+                    fail = f"{code}: {c} {msg}"
+            except Exception as e:
+                fail = f"{code}: {str(e)[:150]}"
+                break
+            time.sleep(0.4)
+        print(f"  cancel via CancelTSStrategyOrderV1: {cancelled}/{len(ok)}"
+              + (f" (last failure: {fail})" if fail else ""))
+        if cancelled < len(ok):
+            print("  NOTE: anything left armed shows up in your Capital App - cancel it manually")
         tr.disconnect()
     if lat:
-        print(f"\n[RISK3] submit->ack n={len(lat)} median={statistics.median(lat)*1000:.0f}ms "
-              f"max={max(lat)*1000:.0f}ms -> {1/statistics.median(lat):.1f} orders/s single-threaded")
-        print(f"  22 orders would take {statistics.median(lat)*22:.1f}s sequentially")
+        med = statistics.median(lat)
+        print(f"\n[RISK3] submit->ack n={len(lat)} median={med*1000:.0f}ms "
+              f"p95={_pct(lat,.95)*1000:.0f}ms max={max(lat)*1000:.0f}ms "
+              f"-> {1/med:.1f} orders/s single-threaded")
+        print(f"  22 orders sequentially: {med*22:.1f}s")
     R["risk3"] = {"ack_latency_s": lat,
-                  "orders_per_second": (1/statistics.median(lat)) if lat else None}
+                  "orders_per_second": (1/statistics.median(lat)) if lat else None,
+                  "cancel_ok": cancelled if 'cancelled' in dir() else None}
+
+
+def cancel_orphans():
+    """Cancel day-trade smart orders left armed by an earlier probe run."""
+    import gap_fade_auto as G
+    import comtypes.client
+    cfg = G.Config()
+    center = comtypes.client.CreateObject(G.sk.SKCenterLib, interface=G.sk.ISKCenterLib)
+    order = comtypes.client.CreateObject(G.sk.SKOrderLib, interface=G.sk.ISKOrderLib)
+    reply = comtypes.client.CreateObject(G.sk.SKReplyLib, interface=G.sk.ISKReplyLib)
+
+    class RE:
+        def OnReplyMessage(self, u, m):
+            return -1
+    keep = [comtypes.client.GetEvents(reply, RE())]
+    center.SKCenterLib_SetAuthority(0)
+    n = center.SKCenterLib_Login(cfg.cust_cert_id, cfg.password)
+    if n != 0:
+        print(f"[cancel] login failed: {center.SKCenterLib_GetReturnCodeMessage(n)}")
+        return
+    order.SKOrderLib_Initialize()
+    order.ReadCertByID(cfg.cust_cert_id)
+    keys = [a for a in sys.argv[2:]]
+    if not keys:
+        print("[cancel] pass 條件單號 as arguments: python v13_live_risk.py cancel 27440214 ...")
+        return
+    for k in keys:
+        code, msg = G.cancel_smart_order(order, cfg.cust_cert_id, "913R0438724", k)
+        print(f"  cancel {k} -> {code} {msg}")
+        time.sleep(0.6)
 
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if mode == "cancel":
+        cancel_orphans()
+        sys.exit(0)
     if mode in ("quotes", "all"):
         risk_quotes()
     if mode in ("borrow", "all"):
