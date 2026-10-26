@@ -251,7 +251,7 @@ Factor panel as-of 2026-10-22 (lag 4d)   ← 不再觸發 STALE，不再餵 NaN
 | 其他/ETF | 2,830 | 2.3% | 54.0% | +0.28% |
 
 上櫃占 42.5% 的訊號、每筆 edge 是上市的 1.8 倍，逐年穩定 40–48%。
-舊掃描走 TWSE MIS `getStockInfo.jsp`，**只服務上市**，所以那行
+舊掃描走 TWSE MIS `getStockInfo.jsp` 且**只送 `tse_` 前綴**，所以那行
 `COVERAGE: 851/1928 無報價` 的 851 檔正好就是宇宙裡的 851 檔上櫃 ——
 這是 train/serve 不一致，203% 在修好前不能當實盤預期。
 
