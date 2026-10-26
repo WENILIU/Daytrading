@@ -21,7 +21,7 @@ def build():
     up_t=(H.values>=LU.values-1e-9)&valid.values; up_l=(C.values>=LU.values-1e-9)&valid.values
     dn_t=(L.values<=LD.values+1e-9)&valid.values; dn_l=(C.values<=LD.values+1e-9)&valid.values
     gu=(O.values>=PC.values*1.05)&valid.values; gd=(O.values<=PC.values*0.95)&valid.values
-    idx,cols=C.index,cols=C.columns
+    idx,cols=C.index,C.columns
     def mk(a): return pd.DataFrame(np.asarray(a,dtype=float),index=idx,columns=cols)
     def rate(n,d,win,mind):
         a=mk(n).rolling(win).sum(); b=mk(d).rolling(win).sum(); return (a/b).where(b>=mind)

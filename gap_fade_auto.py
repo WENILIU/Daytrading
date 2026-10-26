@@ -134,6 +134,7 @@ class Config:
     # ===== v13 MODEL (exported by v13_export_model.py) =====
     model_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\v13_model.pkl")
     pred_q_min = 0.20               # skip bottom 20 pct of predicted PnL
+    max_factor_lag_days = 10      # panel older than this -> feed NaN factors, like the backtest
 
     # ===== v13 EXIT =====
     stop_loss_pct = 0.04            # SL 4 pct, capped by price limit (dynamic)
@@ -458,12 +459,7 @@ class GapFadeAutoTrader:
         self.market_drawdown = 0.0
         self._logged_in = False
 
-        # Equity drawdown control state
-        self._peak_equity = config.capital
-        self._current_equity = config.capital
-        self._load_equity_state()
-
-        # Setup logging
+        # Setup logging (must happen before anything that logs)
         config.log_dir.mkdir(parents=True, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
         log_file = config.log_dir / f"trading_{today}.log"
@@ -477,6 +473,11 @@ class GapFadeAutoTrader:
             ]
         )
         self.log = logging.getLogger("GapFade")
+
+        # Equity drawdown control state
+        self._peak_equity = config.capital
+        self._current_equity = config.capital
+        self._load_equity_state()
 
     # ----------------------------------------------------------
     # CONNECTION (SKCOM)
@@ -871,6 +872,7 @@ class GapFadeAutoTrader:
     def _load_reference_panels(self):
         """Factor panel (already shifted to T-1) + T-1 turnover from the local store."""
         self._factor_row = None
+        self._factor_lag = None
         self._t1_turnover = {}
         try:
             import v13_factors as VF
@@ -880,10 +882,26 @@ class GapFadeAutoTrader:
             if tvrow is not None:
                 self._t1_turnover = {str(k): float(v) for k, v in tvrow.dropna().items()}
             lag = (pd.Timestamp(datetime.now().date()) - pd.Timestamp(d)).days
+            self._factor_lag = lag
             self.log.info(f"  Factor panel as-of {d} (lag {lag}d), turnover keys {len(self._t1_turnover)}")
-            if lag > 7:
-                self.log.warning(f"  FACTOR PANEL STALE by {lag}d. Measured cost: ~3pct edge loss at 20d, "
-                                 f"~11pct at 60d. Refresh D:\\AI專案\\StockAgent\\finlab\\database first.")
+            if lag > self.config.max_factor_lag_days:
+                # The backtest never saw a value for these dates - the panel did
+                # not cover them, so those rows were scored with NaN and
+                # HistGradientBoosting routed them to its missing-value branch.
+                # Substituting a frozen snapshot would make live diverge from the
+                # backtest, and the measured sensitivity is asymmetric: dropping
+                # all panel factors costs SHORT +2.4 pct RMSE but LONG +26.5 pct.
+                # Match the backtest, and say so out loud.
+                self.log.warning(
+                    f"  FACTOR PANEL STALE by {lag}d (> {self.config.max_factor_lag_days}d). "
+                    f"Feeding NaN factors, which is how the backtest scored these dates. "
+                    f"Measured cost (same models, only panel cols removed): SHORT loses 29% of "
+                    f"its trades but per-trade quality rises; LONG admits 2,380 trades averaging "
+                    f"-1.19% and per-trade PnL falls +1.35% -> +0.82%. The panel stops at {d} "
+                    f"and will NOT move on --refresh: it reads the local finlab copy, and "
+                    f"is_vip()=False caps that at 2023-12-31. See LIVE_READINESS.md sec.7.")
+                self._factor_row = None
+
         except Exception as e:
             self.log.warning(f"  Factor panel unavailable ({e}) -> model uses NaN factors")
 
@@ -999,6 +1017,12 @@ class GapFadeAutoTrader:
                     r[c] = float(v) if pd.notna(v) else _np.nan
             rows.append(r)
         X = pd.DataFrame(rows)
+        # A column can be absent when the panel has no row for a candidate. The
+        # models take NaN natively, so materialise the column rather than letting
+        # X.loc[..., e["cols"]] raise KeyError on the whole batch.
+        need = sorted({c for e in list(m["prod_models"].values()) + list(m["prod_models2"].values())
+                       for c in e["cols"]})
+        X = X.reindex(columns=list(X.columns) + [c for c in need if c not in X.columns])
         pr1 = _np.full(len(X), _np.nan); pr2 = _np.full(len(X), _np.nan)
         dirs = _np.array([s.direction.value for s in signals])
         for direc in ("SHORT", "LONG"):
