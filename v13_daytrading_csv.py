@@ -6,7 +6,7 @@ no margin) with the same fields the audit charts show, plus a running cash balan
 import argparse, os, re, warnings
 import numpy as np, pandas as pd
 warnings.filterwarnings("ignore")
-from v13_engine import run_backtest, stats, exit_of, CAP0, COST
+from v13_engine import run_backtest, stats, exit_of, exit_of_legal, CAP0, COST, SLO
 
 OUT = r"D:\AI專案\StockAgent\DayTrading\daytrading.csv"
 
@@ -38,14 +38,20 @@ rows = []
 for _, r in C.iterrows():
     d = pd.Timestamp(r["date"])
     code = str(r["stock"])
-    ex, slp, reason, gross = exit_of(r["direction"], float(r["entry"]), float(r["day_high"]),
-                                     float(r["day_low"]), float(r["day_close"]), float(r["lu"]),
-                                     float(r["ld"]), float(r["tick"]), float(r["tp"]))
+    pr = float(r["entry"]); lu = float(r["lu"]); ld = float(r["ld"]); tk = float(r["tick"]); tpv = float(r["tp"])
+    ex, slp, tpp, reason, gross = exit_of_legal(r["direction"], pr, float(r["day_high"]),
+                                                float(r["day_low"]), float(r["day_close"]),
+                                                lu, ld, tk, tpv)
+    if r["direction"] == "SHORT":
+        sl_raw = min(pr * (1 + SLO), lu - tk); tp_raw = pr * (1 - tpv)
+    else:
+        sl_raw = max(pr * (1 - SLO), ld + tk); tp_raw = pr * (1 + tpv)
+    ex_raw, _, _, gross_raw = exit_of(r["direction"], pr, float(r["day_high"]), float(r["day_low"]),
+                                      float(r["day_close"]), lu, ld, tk, tpv)
     net = gross - 2 * COST
     notional = float(r["_notional"])
     dv = float(vol.at[d, code]) if code in vol.columns and d in vol.index else np.nan
     dto = float(turn.at[d, code]) if code in turn.columns and d in turn.index else np.nan
-    tpp = float(r["entry"]) * (1 - float(r["tp"])) if r["direction"] == "SHORT" else float(r["entry"]) * (1 + float(r["tp"]))
     rows.append({
         "日期": d.strftime("%Y-%m-%d"), "序": int(r["_rank"]), "股票": code, "方向": r["direction"],
         "成交張數": int(r["_shares"] / 1000), "成交股數": int(r["_shares"]), "成交金額(元)": round(notional),
@@ -57,6 +63,9 @@ for _, r in C.iterrows():
         "進場距漲停%": round(float(r["zt_dist"]) * 100, 2),
         "日高": round(float(r["day_high"]), 2), "日低": round(float(r["day_low"]), 2), "收盤": round(float(r["day_close"]), 2),
         "停損價": round(slp, 2), "停利價": round(tpp, 2), "停利TP%": round(float(r["tp"]) * 100, 1),
+        "停損價(回測連續價)": round(sl_raw, 3), "停利價(回測連續價)": round(tp_raw, 3),
+        "價位需取整": bool(abs(slp - sl_raw) > 1e-9 or abs(tpp - tp_raw) > 1e-9),
+        "盈虧(元)回測連續價": round(notional * (gross_raw - 2 * COST)),
         "出場價": round(ex, 2), "出場原因": reason,
         "毛損益%": round(gross * 100, 2), "淨損益%": round(net * 100, 2), "盈虧(元)": round(notional * net),
         "模型分位pred_q": round(float(r["pred_q"]), 3), "TP分位q1": round(float(r["q1"]), 3),
@@ -85,6 +94,10 @@ print("起始 %.0f  期末 %.0f  盈虧 %.0f 元 (%.2f%%)" % (a.capital, bal.ilo
 print("勝率 %.1f%%  平均淨損益 %.3f%%  最差單筆 %.2f%%" %
       ((T["盈虧(元)"] > 0).mean() * 100, T["淨損益%"].mean(), T["淨損益%"].min()))
 print("出場原因:", T["出場原因"].value_counts().to_dict())
+d = T["盈虧(元)"] - T["盈虧(元)回測連續價"]
+print("價位需取整: %d / %d 筆 (%.1f%%)" % (int(T["價位需取整"].sum()), len(T), int(T["價位需取整"].sum()) / len(T) * 100))
+print("取整後 vs 回測連續價: 總損益差 %.0f 元 (%.4f%%)  最大單筆差 %.0f 元" %
+      (d.sum(), d.sum() / T["盈虧(元)回測連續價"].sum() * 100, d.abs().max()))
 print("我占當日額百分比 最大 %.3f  中位 %.3f" % (T["我占當日額%"].max(), T["我占當日額%"].median()))
 mm = T.assign(m=T["日期"].str[:7]).groupby("m").agg(筆數=("盈虧(元)", "size"), 盈虧=("盈虧(元)", "sum"),
                                                     勝率=("盈虧(元)", lambda x: (x > 0).mean() * 100))

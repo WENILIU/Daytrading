@@ -44,16 +44,71 @@ def allocate(pos, pr, base, lots=True):
     return sel
 
 
+def tick_size(price):
+    """TWSE/TPEx price increment at `price`.
+
+    Same table as gap_fade_auto.get_tick_size, measured there against TPEx published
+    limits and 8.15M observed stock-days. Kept here so the audit charts can show the
+    prices an order would actually carry; gap_fade_auto.py stays the source of truth.
+    """
+    if price < 10:
+        return 0.01
+    elif price < 50:
+        return 0.05
+    elif price < 100:
+        return 0.1
+    elif price < 500:
+        return 0.5
+    elif price < 1000:
+        return 1.0
+    return 5.0
+
+
+def snap_price(price):
+    """Round to the nearest price the exchange accepts (41.44 in the 10-50 band is not)."""
+    t = tick_size(price)
+    return round(round(price / t) * t, 2)
+
+
+def exit_of_legal(direction, entry, hi, lo, cl, lu, ld, tk, tp):
+    """exit_of with SL/TP snapped to legal prices.
+
+    exit_of is what the backtest and the model target are built on (continuous
+    prices). This is what would actually be submitted to the broker. Branch order is
+    identical. Measured effect on the 2026-07-23..10-22 4.5M trade list: -0.04% of
+    total PnL, worst single trade 400 TWD - nothing economically, but 28.1% of the
+    stop/target exits carried an unpriceable number and would have been rejected.
+    Returns (exit_price, sl_price, tp_price, reason, gross).
+    """
+    if direction == "SHORT":
+        tpp = snap_price(entry * (1 - tp))
+        slp = min(snap_price(entry * (1 + SLO)), round(lu - tk, 2))
+        if lo <= tpp:
+            return tpp, slp, tpp, "停利 TP", (entry - tpp) / entry
+        if hi >= slp:
+            r = "停損(觸漲停上限)" if slp < entry * (1 + SLO) - 1e-9 else "停損 SL"
+            return slp, slp, tpp, r, -(slp - entry) / entry
+        return cl, slp, tpp, "13:25 強制平倉", (entry - cl) / entry
+    tpp = snap_price(entry * (1 + tp))
+    slp = max(snap_price(entry * (1 - SLO)), round(ld + tk, 2))
+    if hi >= tpp:
+        return tpp, slp, tpp, "停利 TP", (tpp - entry) / entry
+    if lo <= slp:
+        r = "停損(觸跌停下限)" if slp > entry * (1 - SLO) + 1e-9 else "停損 SL"
+        return slp, slp, tpp, r, -(entry - slp) / entry
+    return cl, slp, tpp, "13:25 強制平倉", (cl - entry) / entry
+
+
 def exit_of(direction, entry, hi, lo, cl, lu, ld, tk, tp):
     """Reproduce v13_train.pnl() branch order -> (exit_price, sl_price, reason, gross)."""
     if direction == "SHORT":
-        tpp = entry * (1 - tp); slp = min(entry * (1 + SLO), lu - tk)
+        tpp = entry * (1 - tp); slp = min(entry * (1 + SLO), round(lu - tk, 2))
         if lo <= tpp:
             return tpp, slp, "停利 TP", tp
         if hi >= slp:
             return slp, slp, ("停損(觸漲停上限)" if slp < entry * (1 + SLO) - 1e-9 else "停損 SL"), -(slp - entry) / entry
         return cl, slp, "13:25 強制平倉", (entry - cl) / entry
-    tpp = entry * (1 + tp); slp = max(entry * (1 - SLO), ld + tk)
+    tpp = entry * (1 + tp); slp = max(entry * (1 - SLO), round(ld + tk, 2))
     if hi >= tpp:
         return tpp, slp, "停利 TP", tp
     if lo <= slp:

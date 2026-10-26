@@ -25,7 +25,7 @@ plt.rcParams["axes.unicode_minus"] = False
 import finlab
 from finlab import data as fdata
 
-from v13_engine import run_backtest, stats, exit_of, CAP0, COST
+from v13_engine import run_backtest, stats, exit_of, exit_of_legal, CAP0, COST, SLO
 
 CFG = dict(kmode="one", tmode="on", min_weight=0.005, min_range=0.001)
 
@@ -43,9 +43,14 @@ def build_table(date):
     for _, r in A.sort_values("_rank").iterrows():
         pr = float(r["entry"]); pos = float(r["_weight"])
         code = str(r["stock"])
-        ex, slp, reason, gross = exit_of(r["direction"], pr, float(r["day_high"]), float(r["day_low"]),
-                                         float(r["day_close"]), float(r["lu"]), float(r["ld"]),
-                                         float(r["tick"]), float(r["tp"]))
+        lu = float(r["lu"]); ld = float(r["ld"]); tk = float(r["tick"]); tpv = float(r["tp"])
+        ex, slp, tpp, reason, gross = exit_of_legal(r["direction"], pr, float(r["day_high"]),
+                                                    float(r["day_low"]), float(r["day_close"]),
+                                                    lu, ld, tk, tpv)
+        if r["direction"] == "SHORT":
+            sl_raw = min(pr * (1 + SLO), lu - tk); tp_raw = pr * (1 - tpv)
+        else:
+            sl_raw = max(pr * (1 - SLO), ld + tk); tp_raw = pr * (1 + tpv)
         net = gross - 2 * COST
         sh = float(int(pos * CAP0 / (pr * 1000)) * 1000)
         status = "可下"
@@ -63,7 +68,6 @@ def build_table(date):
             rem -= sh * pr
         dv = float(vol.at[d, code]) if code in vol.columns and d in vol.index else np.nan
         dto = float(turn.at[d, code]) if code in turn.columns and d in turn.index else np.nan
-        tpp = pr * (1 - float(r["tp"])) if r["direction"] == "SHORT" else pr * (1 + float(r["tp"]))
         rows.append({
             "日期": date, "序": int(r["_rank"]), "股票": code, "方向": r["direction"],
             "成交張數": int(sh / 1000), "成交股數": int(sh), "成交金額(萬)": round(sh * pr / 1e4, 2),
@@ -75,6 +79,8 @@ def build_table(date):
             "日高": round(float(r["day_high"]), 2), "日低": round(float(r["day_low"]), 2),
             "收盤": round(float(r["day_close"]), 2),
             "停損價": round(slp, 2), "停利價": round(tpp, 2), "停利TP%": round(float(r["tp"]) * 100, 1),
+            "停損價(未取整)": round(sl_raw, 3), "停利價(未取整)": round(tp_raw, 3),
+            "價位需取整": bool(abs(slp - sl_raw) > 1e-9 or abs(tpp - tp_raw) > 1e-9),
             "出場價": round(ex, 2), "出場原因": reason,
             "毛損益%": round(gross * 100, 2), "淨損益%": round(net * 100, 2),
             "盈虧(元)": round(sh * pr * net),
@@ -110,7 +116,9 @@ if __name__ == "__main__":
     sa = stats(cv["A_pnl"]); sc = stats(cv["C_pnl"])
     L = []
     w = L.append
-    w("Gap Fade v13 - %s 逐筆審查（現行 V4 配置：k_model off / k_trail on / min_pos_pct 0.5%% / min_range 0.1%%）" % a.date)
+    w("Gap Fade v13 - %s 逐筆審查（現行 V6 配置：k_model off / k_trail on / min_pos_pct 0.5%% / "
+      "min_range 0.1%% / 漲停價、停損價、停利價皆為交易所合法價格，"
+      "且漲停-1價比較已消除浮點誤差）" % a.date)
     w("=" * 78)
     w("大盤開盤 Gap %+.2f%%，通過全部過濾的訊號 %d 個" % (row["market_ret"] * 100, int(row["n_signals"])))
     w("淨值距高峰回撤 %.2f%% -> 倉位倍數 %.1f；30 日邊際倍數 %s" %
@@ -132,6 +140,16 @@ if __name__ == "__main__":
     for _, r in T[~T["450萬狀態"].str.startswith("可下")].sort_values("序").head(8).iterrows():
         w("  #%-3d %s 模型分位 %.2f 設計權重 %.2f%% -> %s" %
           (r["序"], r["股票"], r["模型分位pred_q"], r["設計權重%"], r["450萬狀態"]))
+    w("")
+    nfix = int(T["價位需取整"].sum())
+    dmax = 0.0
+    for _, r in T.iterrows():
+        if r["價位需取整"] and r["成交股數"] > 0:
+            dmax = max(dmax, abs(r["停損價"] - r["停損價(未取整)"]) * r["成交股數"],
+                       abs(r["停利價"] - r["停利價(未取整)"]) * r["成交股數"])
+    w("停損/停利價已對齊交易所合法價位（間隔 <10:0.01 / 10-50:0.05 / 50-100:0.1 /")
+    w("100-500:0.5 / 500-1000:1.0 / >=1000:5.0）。CSV「停損價(未取整)」是回測用的連續價，")
+    w("未對齊的訂單會被交易所退單。本日 %d/%d 筆需要取整，本日最大單筆損益差 %.0f 元。" % (nfix, len(T), dmax))
     w("")
     w("這圖不能告訴你什麼：它是當日 OHLC 示意，不是盤中走勢（10/21 沒有 1 分 K，本地 1 分 K")
     w("只到 2025-03~2025-10 與 2026-01，富果 intraday/candles 目前金鑰回傳 0 筆）。")

@@ -15,20 +15,31 @@ pc=np.roll(CP,1,axis=0); pc[0]=np.nan; ptv=np.roll(TV,1,axis=0); ptv[0]=np.nan
 mv=mktgap[:,None]
 gap=OP/pc-1.0; adj=gap-mv
 def tsz(p):
-    if p<10: return 0.05
+    # price increment by band; measured 2026-10-27, see gap_fade_auto.get_tick_size
+    if p<10: return 0.01
     if p<50: return 0.05
     if p<100: return 0.1
     if p<500: return 0.5
     if p<1000: return 1.0
-    if p<5000: return 5.0
-    return 10.0
-t=np.vectorize(tsz)(pc)
-# round to the tick decimals: floor(44.0*1.10/0.1)*0.1 evaluates to 48.400000000000006,
-# which made the opening-lock test below compare 48.40 < 48.400000000000006 and let
-# locked-limit-up opens into the universe. The live script rounds its limits (gap_fade_auto
-LU=np.round(np.floor(pc*1.10/t)*t,4); LD=np.round(np.ceil(pc*0.90/t)*t,4)
-TK=np.vectorize(tsz)(OP)
+    return 5.0
+# The band comes from the LIMIT price, not from the previous close. Checked against
+# TPEx's published 次日漲停價/次日跌停價 for all 867 OTC stocks on 2026-10-22: this
+# reproduces 99.88%, band-by-prev_close only 87.9%. Over 2007-2026 (8.15M stock-days)
+# the old rule put the limit BELOW the observed intraday high on 9,475 days, which is
+# impossible; this one leaves 922 (除權息 reference prices, first-day listings).
+# An over-high limit is also what let locked limit-ups back into the universe: an open
+# AT the true limit failed the OP>=LU test below.
+RU=pc*1.10; RD=pc*0.90
+t=np.vectorize(tsz)(RU); td=np.vectorize(tsz)(RD)
+# round() before floor/ceil: floor(44.0*1.10/0.1)*0.1 is 48.400000000000006 in float,
+# which made an open of 48.40 look "not locked".
+LU=np.round(np.floor(np.round(RU/t,9))*t,4); LD=np.round(np.ceil(np.round(RD/td,9))*td,4)
 A=np.abs(adj); short=adj>0
+# TK is the increment at the LIMIT price, not at the entry price: lu - tick has to be a
+# price the exchange accepts. 5215 2013-01-03: entry 46.70 (0.05 band) but limit 50.10
+# (0.1 band) -> 50.05 is invalid, 50.00 is valid. 7.3% of SHORT and 4.7% of LONG signals
+# straddle a band edge, so this is not hypothetical.
+TK=np.vectorize(tsz)(np.where(short,LU,LD))
 ztd=np.where(short,(LU-OP)/np.where(OP==0,1,OP),(OP-LD)/np.where(OP==0,1,OP))
 base=(A>=0.015)&(OP>=30)&(ptv>=1e7)&np.isfinite(pc)&np.isfinite(OP)&(ztd>0)
 base&= ~((OP>=LU-1e-6)|(OP<=LD+1e-6))  # tolerance: an open AT the limit is locked, not tradeable

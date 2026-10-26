@@ -456,9 +456,16 @@ class Direction(Enum):
 
 
 def get_tick_size(price: float) -> float:
-    """TWSE minimum tick size by price level."""
+    """TWSE/TPEx price increment (买卖间隔 / 涨跌取整间隔) at `price`.
+
+    Measured 2026-10-27 from 2025+ closes of every 4-digit listed/OTC stock in the
+    local price store: <10 -> 0.01, 10-50 -> 0.05, 50-100 -> 0.1, 100-500 -> 0.5,
+    500-1000 -> 1.0, >=1000 -> 5.0. The 500-1000 and >=1000 bands came back at
+    100.0% and 97.8% of observed gaps, so the table is not a guess. The old table
+    returned 0.05 under 10 and 10.0 at or above 5000, both wrong.
+    """
     if price < 10:
-        return 0.05
+        return 0.01
     elif price < 50:
         return 0.05
     elif price < 100:
@@ -467,19 +474,53 @@ def get_tick_size(price: float) -> float:
         return 0.5
     elif price < 1000:
         return 1.0
-    elif price < 5000:
-        return 5.0
     else:
-        return 10.0
+        return 5.0
+
+
+def snap_to_valid_price(price: float) -> float:
+    """Round `price` to the nearest price the exchange actually accepts.
+
+    The backtest evaluates stops and targets on continuous prices, but an order
+    carrying 41.44 in the 10-50 band (increment 0.05) is not a price the market
+    has. Measured 2026-10-27 on the 2026-07-23..10-22 4.5M trade list (751 trades):
+    89.9% carried such a price. Snapping alone moves total PnL by -1,148 TWD out of
+    1,395,438 (-0.08%), worst single trade 2,000 TWD - economically nothing, but the
+    order would otherwise be rejected. (An earlier -50,054 TWD reading was not snapping
+    at all: it was the lu-tk float artefact below, now fixed in v13_engine/v13_train.)
+    """
+    tick = get_tick_size(price)
+    return round(round(price / tick) * tick, 2)
 
 
 def calc_price_limits(prev_close: float) -> tuple:
-    """Calculate limit-up/limit-down from previous close.
-    TWSE rule: limit_up rounds DOWN to tick, limit_down rounds UP to tick."""
+    """Limit-up / limit-down from previous close.
+
+    Two rules, and the second one used to be wrong here:
+
+    1. limit_up rounds DOWN to the increment, limit_down rounds UP.
+    2. The increment comes from the band of the LIMIT price, not of the previous
+       close. TPEx publishes 次日漲停價, which settles it: 1294 closed 49.50 and its
+       limit is 54.40 = floor(54.45/0.1)*0.1 (the 50-100 band), not
+       floor(54.45/0.05)*0.05 = 54.45. Same for 1580 (95.80 -> 105.00) and
+       1240 (53.70 -> 59.00 up but 48.35 down, i.e. two different bands).
+
+    Verified against TPEx's own published limits for all 867 OTC stocks on
+    2026-10-22: this reproduces 99.88% (the old rule got 87.9%). Over
+    2007-04..2026-10, 8.15M stock-days, the old rule placed the computed limit
+    BELOW the observed intraday high on 9,475 days, which cannot happen; this one
+    leaves 922, which are 除權息 reference adjustments and first-day listings.
+
+    This is the bug that kept re-listing locked limit-ups: an open sitting AT the
+    true limit compared as "not locked" against an over-high computed limit.
+    """
     import math
-    tick = get_tick_size(prev_close)
-    limit_up = math.floor(prev_close * 1.10 / tick) * tick
-    limit_down = math.ceil(prev_close * 0.90 / tick) * tick
+    raw_up = prev_close * 1.10
+    raw_dn = prev_close * 0.90
+    tick_up = get_tick_size(raw_up)
+    tick_dn = get_tick_size(raw_dn)
+    limit_up = math.floor(round(raw_up / tick_up, 9)) * tick_up
+    limit_down = math.ceil(round(raw_dn / tick_dn, 9)) * tick_dn
     return round(limit_up, 2), round(limit_down, 2)
 
 
@@ -487,16 +528,24 @@ def calc_effective_sl(entry: float, prev_close: float, direction,
                       base_sl_pct: float) -> tuple:
     """Dynamic SL: min(normal SL, price_limit - 1 tick). Always reachable."""
     limit_up, limit_down = calc_price_limits(prev_close)
-    tick = get_tick_size(entry)
+    # The decrement must come from the band of the LIMIT price, because `lu - tick`
+    # has to be a price the exchange accepts. 5215 on 2013-01-03: entry 46.70
+    # (10-50 band, 0.05), limit 50.10 (50-100 band, 0.1) -> 50.05 is not a valid
+    # price there; 50.00 is. 7.3% of SHORT signals and 4.7% of LONG signals straddle
+    # a band edge, so this is not hypothetical.
+    tick = get_tick_size(limit_up if direction == Direction.SHORT else limit_down)
+    # lu - tk is not exact in binary floating point: 43.85 - 0.05 = 43.800000000000004.
+    # Compared against a high of 43.80 that reads as "not stopped", which is why the
+    # backtest used to miss 165 SHORT stops. Round before comparing and before ordering.
 
     if direction == Direction.SHORT:
-        normal_sl = entry * (1 + base_sl_pct)
-        limit_sl = limit_up - tick
+        normal_sl = snap_to_valid_price(entry * (1 + base_sl_pct))
+        limit_sl = round(limit_up - tick, 2)
         sl_price = min(normal_sl, limit_sl)
         sl_pct = (sl_price - entry) / entry
     else:
-        normal_sl = entry * (1 - base_sl_pct)
-        limit_sl = limit_down + tick
+        normal_sl = snap_to_valid_price(entry * (1 - base_sl_pct))
+        limit_sl = round(limit_down + tick, 2)
         sl_price = max(normal_sl, limit_sl)
         sl_pct = (entry - sl_price) / entry
 
@@ -1639,9 +1688,9 @@ class GapFadeAutoTrader:
 
             tp_pct = self._get_tp_pct(sig)
             if sig.direction == Direction.SHORT:
-                sig.tp_price = round(entry_price * (1 - tp_pct), 1)
+                sig.tp_price = snap_to_valid_price(entry_price * (1 - tp_pct))
             else:
-                sig.tp_price = round(entry_price * (1 + tp_pct), 1)
+                sig.tp_price = snap_to_valid_price(entry_price * (1 + tp_pct))
             sig._tp_pct = tp_pct
 
             limit_up, limit_down = calc_price_limits(sig.prev_close)

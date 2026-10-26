@@ -12,12 +12,12 @@ def pnl(d,tp,sl):
         if not m.any(): continue
         ee=e[m]
         if sh:
-            tpp=ee*(1-tp); slp=np.minimum(ee*(1+sl), lu[m]-tk[m])
+            tpp=ee*(1-tp); slp=np.minimum(ee*(1+sl), np.round(lu[m]-tk[m],2))
             r=(ee-cl[m])/ee
             h=hi[m]>=slp; r[h]=-(slp[h]-ee[h])/ee[h]
             hp=lo[m]<=tpp; r[hp]=tp
         else:
-            tpp=ee*(1+tp); slp=np.maximum(ee*(1-sl), ld[m]+tk[m])
+            tpp=ee*(1+tp); slp=np.maximum(ee*(1-sl), np.round(ld[m]+tk[m],2))
             r=(cl[m]-ee)/ee
             h=lo[m]<=slp; r[h]=-(ee[h]-slp[h])/ee[h]
             hp=hi[m]>=tpp; r[hp]=tp
