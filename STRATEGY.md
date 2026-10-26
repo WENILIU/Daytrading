@@ -1,13 +1,14 @@
 # Gap Fade v13 — 開盤跳空反轉（最終版）
 
-> 實盤腳本：`gap_fade_auto.py`（`live` / `sim` / `now` 三種模式）
+> 實盤腳本：`gap_fade_auto.py`（`live` / `sim` / `now` / `scan` 四種模式；`scan` 只掃描不下單，並自己量 RISK1）
+> 實盤流程與逐階段日誌地圖：`LIVE_READINESS.md` §10
 > 回測与研究記錄：`RESEARCH_v11_expansion.md`、`v13_final_report.txt`
 > 模型：`v13_model.pkl`（由 `v13_export_model.py` 輸出）
 
 ## 1. 策略邏輯
 
 散戶在開盤把個股推離均值，價格隨後回歸。我們只交易**相對大盤**的異常跳空，
-並在盤中用停利／停利＋13:25 強制平倉把這個回歸變現。全部部位為當沖，不隔夜。
+並在盤中用停損／停利＋13:25 強制平倉把這個回歸變現。全部部位為當沖，不隔夜。
 
 ### 訊號（09:00，一次掃描，不等待確認）
 | 項目 | 內容 |
@@ -16,7 +17,7 @@
 | 個股調整 | `adj_gap = (open/prev_close - 1) - market_gap` |
 | SHORT | `adj_gap >= +1.5%` |
 | LONG | `adj_gap <= -5.0%`（1.5-5% 的 LONG 在無前視下為負邊際，已剔除） |
-| 排除 | 開盤鎖死漲/跌停、處置股（TWSE+TPEx 官方公告）、T-1 成交額 < 1,000 萬、股價 < 30 元、無可借券 |
+| 排除 | 開盤鎖死漲/跌停、處置股與暫停先賣後買當沖（finlab `disposal_information`，兩市）、T-1 成交額 < 1,000 萬、股價 < 30 元、無可借券 |
 
 ### 模型選股（取代早期手寫 score 制）
 HistGradientBoosting 兩段式 walk-forward（逐年重訓，只用往年資料）：
@@ -101,9 +102,9 @@ v13 的做法是**換到幾乎沒有漲停問題的戰場**（1.5-3% 區間觸�
 | 項目 | 說明 |
 |---|---|
 | 交易筆數 | 22.8 筆/日 → **必須自動下單**，手動不可行 |
-| 掃描 | TWSE `getStockInfo.jsp`，1,928 檔約 3.8 秒（含 0050 基準） |
+| 掃描 | 富果批次端點 `intraday/quotes`（兩市全覆蓋）。開盤前先用 T-1 成交額/處置/面板裁剪到 ~905 檔，實測 0.3 秒 |
 | 因子面板 | 每日開盤前 `python v13_factors.py --refresh`（自有價格庫 append 最新日 K 後重建）。 ⚠️ 面板缺失會大幅降低績效（同引擎對照，2023-25 段 1692%→260%），不是「損失 11%」 |
-| 處置股 | `D:\gapfade_data\disposal_panel_full.pkl`（TWSE+TPEx 官方公告，47,714 筆）。每日需更新至當天 |
+| 處置股 | 主線 finlab `disposal_information`（上市+上櫃；實測為交易所公告頁的嚴格超集，14 vs 9，漏的 5 檔查證均為有效處置）。退路只在 finlab 不可用時走，且一律大聲報警 |
 | 模型 | `v13_model.pkl` 每年年底重訓（`v13_export_model.py`，PROD_YEAR 遞增） |
 | 資金 | 450 萬、整張、零融資（總名義 ≤ 淨值） |
 
@@ -111,9 +112,9 @@ v13 的做法是**換到幾乎沒有漲停問題的戰場**（1.5-3% 區間觸�
 
 | 風險 | 狀態 |
 |---|---|
-| **1. 開盤 5 秒成交率** | 未測。`python v13_live_risk.py quotes` 於 08:58 執行，量測「09:00:00 之後幾秒才讀到開盤價」＋全市場掃描完成時間。這是唯一還沒數化的關鍵風險。 |
+| **1. 開盤 5 秒成交率** | **下界已定：~9 秒。** 富果 `openTime` 顯示 2026-10-22 的 2330 開盤價時間是 09:00:08.98 —— 全市場流動性最好那檔也不是 09:00:00.00 可成交，這段與我們的網路速度無關。實際可見延遲仍未測；`python gap_fade_auto.py scan` 會在開盤日自己量出來（08:55 已設自動提醒）。 |
 | **2. 1.5-3% 區間可借券性** | **已初步回答：沒有差別。** 近 45 天 SHORT 訊號按 gap 分組的可借券覆蓋率：1.5-3% = 94.75%、3-5% = 94.32%、5%+ = 96.47%。新戰場的廣度優勢不會被借券吃掉。註：來源為 finlab 出借量代理，**不是群益即時資券**；設定 `YUANTA_APP_KEY/SECRET` 後 `v13_live_risk.py borrow` 會改走 `credit_enquires` 官方查詢。 |
-| **3. 下單延遲與重試** | 交易時段執行 `python v13_live_risk.py orders` 量測 submit→ack 延遲與每秒可送單數；`gap_fade_auto.py` 已記錄每筆 submit/ack 時間、拒單碼與重試，收盤後輸出 `EXECUTION RISK REPORT` 與 `exec_report_YYYYMMDD.json`。 |
+| **3. 下單延遲與重試** | 交易時段執行 `python v13_live_risk.py orders` 量測 submit→ack 延遲與每秒可送單數；`gap_fade_auto.py` 已記錄每筆 submit/ack 時間、拒單碼與重試，收盤後輸出 `EXECUTION RISK REPORT` 與 `exec_report_YYYYMMDD.json`，其中含 **ENTRY SLIPPAGE**（成交價 vs 回測假設價，逐向中位 edge，`edge>0` 一律代表有利）。 |
 
 尚未處理：高價股整張限制。今日範例中 7 個訊號有 5 個因股價 300-900 元、部位上限 9% 而「不足一張」被跳過——
 回測同樣做整張湊整，所以績效數字已含此損耗，但實際曝險會低於模型設計值。
