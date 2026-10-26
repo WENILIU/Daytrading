@@ -43,60 +43,305 @@ import comtypes.gen.SKCOMLib as sk
 DISPOSAL_PANEL = r"D:\gapfade_data\disposal_panel_full.pkl"
 
 
-def get_restricted_stocks() -> set:
-    """Today's disposal stocks (cannot day-trade).
+# --- Day-trade restriction sources -----------------------------------------
+#
+# Primary: finlab (VIP). Checked against the exchange announcement pages on
+# 2026-10-26:
+#   * disposal_information covers BOTH markets - 624 of its 2,255 disposal
+#     codes are 上櫃. The dataset this file used before,
+#     etl:disposal_stock_filter, is 上市 only, and 上櫃 is where ~43 pct of the
+#     model's signals come from.
+#   * It is a strict superset of the live exchange pages: 0 codes missing, 5
+#     extra (2221/3055/3230/3597/4979 - all 處置 10/19~10/27 that the
+#     announcement query window missed).
+#   * day_trade_short_suspension likewise covers more than TWSE openapi
+#     TWTBAU1.
+# Warm fetch measured 0.69s + 0.01s, safe at 08:58. finlab republishes
+# disposal_information at 08:10 Mon-Sat, i.e. before the open.
+#
+# Fallbacks, used only if finlab does not answer: the exchange announcement
+# pages directly, then the historical panel. Every degraded path logs loudly -
+# the old code dropped silently onto a 上市-only list, which is the worst kind
+# of failure because it looks like it worked.
+FINLAB_TOKEN = "Vww04G2yj5qcHkqX6yNCKIOw/GE2oJ9dIlFftXoeN3NqjQTv0YAqWujox5k/ilKd#vip_m"
+FINLAB_DISPOSAL_KEY = "disposal_information"
+FINLAB_NO_DAYTRADE_KEY = "day_trade_short_suspension"
+# 處置 is announced the evening before it takes effect, so a healthy feed is at
+# most 1 day behind. 5 is a generous tripwire, not a normal condition.
+FINLAB_STALE_WARN_DAYS = 5
 
-    Primary source: disposal_panel_full.pkl, built from the OFFICIAL TWSE punish +
-    TPEx disposal announcements (both markets, 47,714 date x stock rows).
-    The old finlab/TWSE-only path missed 上櫃 stocks entirely.
+DISPOSAL_PANEL = r"D:\gapfade_data\disposal_panel_full.pkl"
+
+TWSE_PUNISH_URL = "https://www.twse.com.tw/announcement/punish"
+TPEX_DISPOSAL_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
+TWSE_NO_DAYTRADE_URL = "https://openapi.twse.com.tw/v1/exchangeReport/TWTBAU1"
+RESTRICT_LOOKBACK_DAYS = 45   # disposal windows run 5-7 trading days
+
+_common_stock = lambda c: len(c) == 4 and c[0].isdigit()
+
+
+def _log():
+    import logging
+    return logging.getLogger("GapFade")
+
+
+def _roc_date(text):
+    """'115/10/20' -> date(2026, 10, 20). None if unparseable."""
+    from datetime import date as _date
+    parts = (text or "").strip().split("/")
+    if len(parts) != 3:
+        return None
+    try:
+        y, m, d = (int(p.strip()) for p in parts)
+    except ValueError:
+        return None
+    if y < 200:                    # ROC year
+        y += 1911
+    try:
+        return _date(y, m, d)
+    except ValueError:
+        return None
+
+
+def _roc_compact(text):
+    """'1151103' -> date(2026, 11, 3). None if unparseable."""
+    from datetime import date as _date
+    s = str(text or "").strip()
+    if len(s) != 7 or not s.isdigit():
+        return None
+    try:
+        return _date(int(s[:3]) + 1911, int(s[3:5]), int(s[5:7]))
+    except ValueError:
+        return None
+
+
+def _window_covers_today(text, today) -> bool:
+    """True if a published disposal window contains today.
+
+    Both exchanges publish the resolved calendar window directly: TWSE writes
+    '115/10/20～115/10/27' (full-width tilde), TPEx writes '115/10/23~115/11/03'
+    (half-width). The 營業日 arithmetic is already resolved by the exchange, so a
+    plain containment test reproduces exactly what was announced.
     """
-    # Method 0: authoritative panel (TWSE + TPEx)
+    s = (text or "").replace("～", "~").replace("至", "~")
+    parts = [p for p in s.split("~") if p.strip()]
+    if len(parts) < 2:
+        return False
+    d0, d1 = _roc_date(parts[0]), _roc_date(parts[-1])
+    if d0 is None or d1 is None:
+        return False
+    return d0 <= today <= d1
+
+
+def _col(fields, *needles):
+    for idx, f in enumerate(fields or []):
+        s = str(f)
+        if all(n in s for n in needles):
+            return idx
+    return None
+
+
+_finlab_logged_in = False
+
+
+def _ensure_finlab_login() -> bool:
+    global _finlab_logged_in
+    if _finlab_logged_in:
+        return True
+    log = _log()
+    try:
+        import warnings
+        import finlab
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            finlab.login(FINLAB_TOKEN)
+        _finlab_logged_in = True
+        return True
+    except Exception as exc:
+        log.warning(f"  finlab login failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _from_finlab(today) -> set:
+    """處置 + 暫停先賣後買當沖, both markets. Empty set means no answer."""
+    log = _log()
+    restricted = set()
+    try:
+        import time as _t
+        import pandas as _pd
+        from finlab import data as fdata
+        if not _ensure_finlab_login():
+            return set()
+        t0 = _t.time()
+        now = _pd.Timestamp(today)
+
+        di = fdata.get(FINLAB_DISPOSAL_KEY)
+        di["symbol"] = di["symbol"].astype(str).str.zfill(4)
+        live = di.loc[(
+            _pd.to_datetime(di["處置開始時間"]) <= now) & (
+            _pd.to_datetime(di["處置結束時間"]) >= now), "symbol"]
+        disposal = {c for c in live if _common_stock(c)}
+        restricted |= disposal
+
+        # Freshness. 處置 is published the evening before it starts, so anything
+        # more than a few days behind means today's announcements are absent.
+        pub = _pd.to_datetime(di["date"]).max()
+        lag = (now - pub).days
+        if lag > FINLAB_STALE_WARN_DAYS:
+            log.warning(
+                f"  FINLAB DISPOSAL STALE: newest 處置 announcement is "
+                f"{pub.date()}, {lag} days behind {today}. Stocks disposed "
+                f"after that date will NOT be excluded and the broker will "
+                f"reject them at 09:00.")
+
+        dt = fdata.get(FINLAB_NO_DAYTRADE_KEY)
+        dt["symbol"] = dt["symbol"].astype(str).str.zfill(4)
+        live2 = dt.loc[(
+            _pd.to_datetime(dt["停止先賣後買開始日"]) <= now) & (
+            _pd.to_datetime(dt["停止先賣後買結束日"]) >= now), "symbol"]
+        no_dt = {c for c in live2 if _common_stock(c)}
+        restricted |= no_dt
+
+        log.info(f"  Restricted from finlab in {_t.time()-t0:.2f}s: "
+                 f"{len(disposal)} 處置 (both markets), "
+                 f"{len(no_dt)} 暫停先賣後買當沖")
+        return restricted
+    except Exception as exc:
+        log.warning(f"  finlab restriction source failed: "
+                    f"{type(exc).__name__}: {exc}")
+        return set()
+
+
+def _from_exchanges(today) -> set:
+    """Live announcement pages. Union of both markets + 暫停先賣後買當沖."""
+    log = _log()
+    from datetime import timedelta as _td
+    import requests
+    restricted = set()
+    since = today - _td(days=RESTRICT_LOOKBACK_DAYS)
+
+    def fetch(url, params=None):
+        try:
+            r = requests.get(url, params=params, timeout=15,
+                             headers={"User-Agent": "Mozilla/5.0"})
+        except Exception as exc:
+            log.warning(f"  restriction source unreachable {url}: "
+                        f"{type(exc).__name__}: {exc}")
+            return None
+        if r.status_code != 200:
+            log.warning(f"  restriction source HTTP {r.status_code}: {url}")
+            return None
+        try:
+            return r.json()
+        except Exception as exc:
+            log.warning(f"  restriction source not JSON: {url} ({exc})")
+            return None
+
+    js = fetch(TWSE_PUNISH_URL, {"response": "json",
+                                 "startDate": since.strftime("%Y%m%d"),
+                                 "endDate": today.strftime("%Y%m%d")})
+    if isinstance(js, dict) and js.get("data"):
+        f = js.get("fields") or []
+        ic, isp = _col(f, "證券代號"), _col(f, "處置", "時間")
+        if ic is None or isp is None:
+            log.warning(f"  TWSE punish: unexpected fields {f[:10]}")
+        else:
+            restricted |= {str(r[ic]).strip() for r in js["data"]
+                           if len(r) > max(ic, isp)
+                           and _window_covers_today(r[isp], today)}
+
+    js = fetch(TPEX_DISPOSAL_URL, {
+        "type": "all",
+        "startDate": f"{since.year - 1911}/{since.month:02d}/{since.day:02d}",
+        "endDate": f"{today.year - 1911}/{today.month:02d}/{today.day:02d}"})
+    if isinstance(js, dict) and js.get("tables"):
+        for tb in js["tables"]:
+            f = tb.get("fields") or []
+            ic, isp = _col(f, "證券代號"), _col(f, "處置", "時間")
+            if ic is None or isp is None:
+                continue
+            restricted |= {str(r[ic]).strip() for r in tb.get("data") or []
+                           if len(r) > max(ic, isp)
+                           and _window_covers_today(r[isp], today)}
+
+    js = fetch(TWSE_NO_DAYTRADE_URL)
+    if isinstance(js, list):
+        for row in js:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("Code", "")).strip()
+            d0 = _roc_compact(row.get("StartDate"))
+            d1 = _roc_compact(row.get("EndDate"))
+            if code and d0 and d1 and d0 <= today <= d1:
+                restricted.add(code)
+
+    restricted = {c for c in restricted if _common_stock(c)}
+    if restricted:
+        log.warning("  Restricted list came from the exchange announcement "
+                    "pages, NOT finlab. Measured 2026-10-26 this path misses "
+                    "5 of the 14 active 處置 stocks.")
+    return restricted
+
+
+def _from_panel(today) -> set:
+    """Historical panel. Last resort, and loud about how stale it is."""
+    log = _log()
     try:
         import pandas as _pd
-        from datetime import date as _date
         dp = _pd.read_pickle(DISPOSAL_PANEL)
-        dp["date"] = _pd.to_datetime(dp["date"]); dp["stock"] = dp["stock"].astype(str)
-        hit = dp.loc[dp["date"] == _pd.Timestamp(_date.today()), "stock"]
-        if len(hit):
-            return set(hit.tolist())
-    except Exception:
-        pass
+        dp["date"] = _pd.to_datetime(dp["date"])
+        dp["stock"] = dp["stock"].astype(str).str.zfill(4)
+        last = dp["date"].max()
+        lag = (_pd.Timestamp(today) - last).days
+        if lag > 0:
+            log.warning(
+                f"  DISPOSAL PANEL STALE: newest row {last.date()} is {lag} "
+                f"days behind {today}. It cannot describe today's 處置 list.")
+        hit = dp.loc[dp["date"] == _pd.Timestamp(today), "stock"]
+        return {c for c in hit if _common_stock(c)}
+    except FileNotFoundError:
+        log.warning(f"  DISPOSAL PANEL MISSING: {DISPOSAL_PANEL}")
+    except Exception as exc:
+        log.warning(f"  DISPOSAL PANEL UNREADABLE: {type(exc).__name__}: {exc}")
+    return set()
 
-    restricted = set()
 
-    # Method 1: finlab (TWSE only - incomplete for TPEx)
-    try:
-        from finlab import data as fdata
-        from datetime import date
-        today = date.today().strftime('%Y%m%d')
-        disposal_df = fdata.get('etl:disposal_stock_filter', as_of=today)
-        if disposal_df is not None and len(disposal_df) > 0:
-            # Get the latest date row
-            latest_date = disposal_df.index[-1]
-            row = disposal_df.loc[latest_date]
-            # False = IS disposal (cannot trade)
-            disposal_stocks = row[~row].index.tolist()
-            restricted.update(disposal_stocks)
-    except Exception:
-        pass
-    
-    # Method 2: Exchange API fallback
+def get_restricted_stocks() -> set:
+    """Codes that cannot be day-traded today (處置 + 暫停先賣後買當沖).
+
+    Sources in priority order; the first that answers wins:
+      1. finlab disposal_information + day_trade_short_suspension - both
+         markets, refreshed 08:10, superset of everything else.
+      2. Exchange announcement pages (TWSE + TPEx + TWTBAU1) - reachable
+         without a key, but measured to miss ~1/3 of active 處置 stocks.
+      3. disposal_panel_full.pkl - historical only, useless for today unless
+         refreshed.
+
+    A missed restricted stock is an order the broker rejects at 09:00; an
+    over-excluded stock costs one signal. The first is far more expensive, so
+    every fallback path logs loudly instead of returning a quietly shorter list.
+    """
+    from datetime import date as _date
+    log = _log()
+    today = _date.today()
+
+    restricted = _from_finlab(today)
     if not restricted:
-        try:
-            import requests
-            url = "https://www.twse.com.tw/zh/api/tradingReference/stockRestriction"
-            resp = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-            if resp.status_code == 200:
-                data = resp.json()
-                for row in data.get('data', []):
-                    if len(row) >= 2:
-                        restricted.add(str(row[1]).strip())
-        except Exception:
-            pass
-    
+        restricted = _from_exchanges(today)
+    if not restricted:
+        restricted = _from_panel(today)
+    source_ok = bool(restricted)
+
     # Always exclude known non-day-trade stocks
-    restricted.update(['2330', '2317'])
-    
+    restricted.update(["2330", "2317"])
+
+    if source_ok:
+        log.info(f"  Restricted (cannot day-trade): {len(restricted)} codes")
+    else:
+        log.warning(
+            f"  NO RESTRICTION SOURCE ANSWERED for {today}. Only the "
+            f"{len(restricted)} hardcoded codes are excluded - disposal stocks "
+            f"will reach the exchange and be rejected there.")
     return restricted
 
 
@@ -612,14 +857,8 @@ class GapFadeAutoTrader:
     # ----------------------------------------------------------
 
     def get_price(self, stock_no: str) -> float:
-        """Get current price via Fugle (real-time)"""
-        from fugle_marketdata import RestClient
-        try:
-            client = RestClient(api_key=self.config.fugle_api_key)
-            q = client.stock.intraday.quote(symbol=stock_no)
-            return q.get("lastPrice") or 0.0
-        except Exception:
-            return 0.0
+        """Current price. Same batched path the monitor uses."""
+        return self._fetch_prices([stock_no]).get(stock_no, 0.0)
 
     def subscribe_quotes(self, stock_nos: list[str]):
         """No-op: Fugle quote() is on-demand"""
@@ -1126,6 +1365,51 @@ class GapFadeAutoTrader:
             f"{dropped['disposal']} disposal, kept {len(keep)} "
             f"({dropped['no_turnover_data']} without panel data, decided at scan)")
         return keep
+
+    def _fugle_session(self) -> requests.Session:
+        """Cached session so repeated quote polls reuse one TLS connection."""
+        sess = getattr(self, "_fugle_sess", None)
+        if sess is None:
+            sess = requests.Session()
+            sess.headers.update({"X-API-KEY": self.config.fugle_api_key})
+            self._fugle_sess = sess
+        return sess
+
+    def _fetch_prices(self, codes: list[str]) -> dict[str, float]:
+        """Last price for many symbols in ONE request.
+
+        Measured 2026-10-26: 22 symbols = 0.47s batched vs 11.23s one-by-one.
+        The SL/TP monitor used to poll each position separately, so 22 open
+        positions left an 11s blind spot between two checks - longer than it
+        takes a gap stock to run through its stop.
+        """
+        out = {}
+        uniq = [c for c in dict.fromkeys(codes) if c]
+        if not uniq:
+            return out
+        session = self._fugle_session()
+        size = max(1, self.config.fugle_batch_size)
+        for i in range(0, len(uniq), size):
+            batch = uniq[i:i + size]
+            try:
+                r = session.get(self.config.fugle_batch_url,
+                                params={"symbol": ",".join(batch)}, timeout=10)
+                if r.status_code != 200:
+                    self.log.warning(f"  Fugle price batch {r.status_code}: "
+                                     f"{r.text[:100]}")
+                    continue
+                rows = r.json()
+            except Exception as exc:
+                self.log.warning(f"  Fugle price batch error: {exc}")
+                continue
+            for q in rows:
+                try:
+                    price = float(q.get("lastPrice") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    out[str(q.get("symbol", ""))] = price
+        return out
 
     def _fugle_batch_scan(self, stock_list: list[str]) -> list[dict]:
         """Batch-query Fugle `intraday/quotes?symbol=...` for the WHOLE market.
@@ -1735,22 +2019,15 @@ class GapFadeAutoTrader:
                 self.log.info("  All positions resolved.")
                 break
 
-            # Update prices for reporting (every 60s, lightweight)
+            # Update prices for reporting (every 60s, one batched call)
             if int(now.timestamp()) % 60 < 5:
                 symbols = [s for s, sig in self.active_positions.items()
                            if sig.state in (PositionState.FILLED, PositionState.MONITORING)]
                 if symbols:
-                    from fugle_marketdata import RestClient
-                    rc = RestClient(api_key=self.config.fugle_api_key)
-                    for sym in symbols:
-                        try:
-                            q = rc.stock.intraday.quote(symbol=sym)
-                            price = q.get("lastPrice") or 0
-                        except Exception:
-                            price = 0
-                        if price <= 0:
+                    for sym, price in self._fetch_prices(symbols).items():
+                        sig = self.active_positions.get(sym)
+                        if sig is None:
                             continue
-                        sig = self.active_positions[sym]
                         # Detect likely exit for reporting
                         if sig.direction == Direction.SHORT:
                             if price >= sig.sl_price:
@@ -1868,20 +2145,15 @@ class GapFadeAutoTrader:
 
     def _force_close_all(self):
         """Mark any remaining positions as force-closed (exchange already did it)"""
-        from fugle_marketdata import RestClient
         symbols = [s for s, sig in self.active_positions.items()
                    if sig.state in (PositionState.FILLED, PositionState.MONITORING)]
         if not symbols:
             return
-        rc = RestClient(api_key=self.config.fugle_api_key)
+        prices = self._fetch_prices(symbols)
         for symbol, sig in list(self.active_positions.items()):
             if sig.state not in (PositionState.FILLED, PositionState.MONITORING):
                 continue
-            try:
-                q = rc.stock.intraday.quote(symbol=symbol)
-                price = q.get("lastPrice") or 0
-            except Exception:
-                price = 0
+            price = prices.get(symbol, 0)
             if price <= 0:
                 price = sig.entry_price
             self._mark_exit(sig, price, "FORCE_CLOSE")
@@ -2251,16 +2523,13 @@ class GapFadeSimulator(GapFadeAutoTrader):
         del self.active_positions[sig.symbol]
 
     def _force_close_all_sim(self, client):
-        from fugle_marketdata import RestClient
-        fc_client = RestClient(api_key=self.config.fugle_api_key)
+        symbols = [s for s, sig in self.active_positions.items()
+                   if sig.state in (PositionState.FILLED, PositionState.MONITORING)]
+        prices = self._fetch_prices(symbols)
         for symbol, sig in list(self.active_positions.items()):
             if sig.state not in (PositionState.FILLED, PositionState.MONITORING):
                 continue
-            try:
-                q = fc_client.stock.intraday.quote(symbol=symbol)
-                price = q.get("lastPrice") or 0
-            except Exception:
-                price = 0
+            price = prices.get(symbol, 0)
             if price <= 0:
                 price = sig.entry_price
             self._close_sim(sig, price, "FORCE_CLOSE")
@@ -2317,9 +2586,7 @@ class GapFadeNowTrader(GapFadeSimulator):
             self.disconnect()
 
     def _monitor_now(self):
-        """Monitor for max 30 minutes using Fugle (real-time)"""
-        from fugle_marketdata import RestClient
-        client = RestClient(api_key=self.config.fugle_api_key)
+        """Monitor for max 30 minutes, one batched price call per loop"""
         end_time = datetime.now().timestamp() + 1800  # 30 min
 
         while self.running and datetime.now().timestamp() < end_time:
@@ -2328,16 +2595,13 @@ class GapFadeNowTrader(GapFadeSimulator):
             if not symbols:
                 break
 
+            prices = self._fetch_prices(symbols)
             for symbol, sig in list(self.active_positions.items()):
                 if sig.state not in (PositionState.FILLED, PositionState.MONITORING):
                     continue
                 sig.state = PositionState.MONITORING
 
-                try:
-                    q = client.stock.intraday.quote(symbol=symbol)
-                    price = q.get("lastPrice") or 0
-                except Exception:
-                    continue
+                price = prices.get(symbol, 0)
                 if price <= 0:
                     continue
 

@@ -165,6 +165,11 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
 3. 再跑一次 `python gap_fade_auto.py live`，確認收盤報告的
    `RISK1 opening price visible` 與 `MARKET COVERAGE` 兩行。
 4. 在群益 App 確認 09:00 那批智慧單是**當日**、且停損停利條件正確。
+5. 處置/當沖過濾**不需要手動步驟**：`get_restricted_stocks()` 開盤掃描時直接
+   向 finlab 取（§7C）。日誌一定要看到
+   `Restricted from finlab ... 14 處置 (both markets)` 這行；若看到
+   `came from the exchange announcement pages` 或 `DISPOSAL PANEL STALE`
+   代表退化了，當天不要上實盤。
 5. 上櫃涵蓋率已解決（§7A），203% 不再是「只能下單一半市場」的數字；
    但 RISK1 未量測前，仍不建議直接全倉。
 
@@ -301,6 +306,12 @@ scan#2 ... 0.46s      scan#3 ... 0.50s
 把 3,300 檔的過濾表建好（5 並發約 2.5 分鐘）。上櫃的處置/當沖過濾因此
 也有官方來源可用，不再只能靠 TWSE 公告。
 
+> **2026-10-26 更新：這條盤前建表已不需要。** 處置/暫停先賣後買當沖改由
+> finlab `disposal_information` + `day_trade_short_suspension` 直接取（兩市、
+> 08:10 更新、熱路徑 0.03s），實測還是超集。見 §7C。`limitUpPrice` /
+> `boardLot` 那幾個欄位仍然只有這個端點有，但目前回測用的是自有價格庫，
+> 不需要它。
+
 ### 免費方案的實際上限（全部實測，避免再走回頭路）
 | 來源 | 結果 |
 |---|---|
@@ -402,7 +413,7 @@ MIT、180 星、維護中。它是 **MCP Server**，定位是給 LLM 對話用�
 (1) 請求數減半、降低觸限風險，(2) 查詢清單與模型實際可交易集合一致，
 (3) 處置股過濾真的被套用（這次排掉 16 檔）。
 **瓶頸在停損停利監控**：22 檔逐檔取價一輪 **11.2 秒**，改批次 **0.47 秒（24 倍）**，
-那才是該修的地方，尚未修。
+那才是該修的地方。→ **已修，見 §7C。**
 
 ### 試過並否決：只查「最近出現過訊號」的股票
 | 回看窗口 | 需查股票數 | 覆蓋的歷史下單 |
@@ -414,13 +425,90 @@ MIT、180 星、維護中。它是 **MCP Server**，定位是給 LLM 對話用�
 
 訊號在 1,636 檔之間非常分散，縮到 30 天會漏掉近一半的單。**不划算，不做。**
 
-### ⚠️ 新發現的風險：處置面板可能無聲失效
+### ~~⚠️ 新發現的風險：處置面板可能無聲失效~~ → 已修，見 §7C
 `disposal_panel_full.pkl` 最後一筆是 **2026-10-21**。而 `get_restricted_stocks()`
 用的是 `dp["date"] == date.today()` **完全比對**：面板一旦沒更新到今天，
-`hit` 是空 → 直接掉回 Method 1（finlab，**只含上市**）。
+`hit` 是空 → 直接掉回 Method 1（finlab `etl:disposal_stock_filter`，**只含上市**）。
 也就是**處置過濾會無聲退化成只排上市**，而且不會報錯。
-上實盤前要嘛把面板接進每日 `--refresh`，要嘛改用官方
-`openapi.twse.com.tw/v1/exchangeReport/TWTBAU1`（免 token、即時可直連，已驗證）。
+
+## 7C. 本輪修掉的兩件事：監控批次取價 + 處置過濾改用 finlab（2026-10-26）
+
+### ① 停損停利監控：逐檔取價 → 一次批次（實測 **14–200 倍**）
+
+原本 `monitor_positions()`、`_monitor_now()`、`_force_close_all()`、
+`_force_close_all_sim()`、`get_price()` 五處都是**逐檔**呼叫
+`fugle_marketdata.RestClient(...).stock.intraday.quote(symbol=...)`，
+而且每檔都新建一個 client。22 個部位 = 一輪 22 次 HTTPS 往返。
+
+新增 `GapFadeAutoTrader._fetch_prices(codes)`：用 §7A 那個批次端點
+（`intraday/quotes?symbol=a,b,c`）一次取回 `{symbol: lastPrice}`，
+並用 `_fugle_session()` 保留同一個 `requests.Session` 重用 TLS 連線。
+五處呼叫全部換掉，檔案內已**沒有任何單檔取價**。
+
+實測（2026-10-26，22 檔真實部位簿）：
+
+| 方式 | 22 檔一輪 | 備註 |
+|---|---|---|
+| 逐檔（改之前） | **4.86s**（同日另一次量到 11.23s） | 網路變因大，兩個數字都是真的 |
+| 批次，第一次 | 0.34s | 含建立 TLS |
+| 批次，之後每輪 | **0.024–0.16s**（中位 0.119s） | 監控迴圈會重用連線 |
+| 批次 100 檔 | 0.051s | 96/100 有價，其餘是停用/無成交 |
+
+重點不是「快幾倍」，而是**監控盲區**：22 檔時原本兩次檢查之間有 5–11 秒
+完全不看價格，而跳空股衝過停損只要幾秒。現在盲區 < 0.2 秒。
+`_mark_exit()` 的判斷邏輯完全沒動，只換掉取價方式。
+
+### ② 處置/當沖過濾：主線改 finlab，退路一律大聲報警
+
+**為什麼用 finlab**（2026-10-26 實測比較）：
+
+| 來源 | 今日處置數 | 含上櫃 | 對照結果 |
+|---|---|---|---|
+| `disposal_information`（finlab） | **14** | ✅ 2,255 筆處置記錄中 624 檔是上櫃 | 基準 |
+| 交易所公告頁（TWSE punish + TPEx disposal） | 9 | ✅ | **少 5 檔** |
+| `disposal_panel_full.pkl` | 0（面板停在 10/21） | ✅ | 當日無資料 |
+| `etl:disposal_stock_filter`（舊程式用的） | — | ❌ 只含上市 | — |
+
+那 5 檔（2221/3055/3230/3597/4979）查證都是 **10/19～10/27 的有效處置**，
+公告頁因為「公布日期」落在查詢視窗外而漏掉。反方向 **0 檔** 只出現在公告頁。
+所以 finlab 是嚴格超集。
+另外 `day_trade_short_suspension`（暫停先賣後買當沖）也比 TWSE openapi
+`TWTBAU1` 全（14 vs 8 檔四位碼）。
+
+**速度**：冷 1.47s、熱 **0.03s**。finlab 的 `disposal_information` 排程是
+`10 8 * * 1-6`（週一～週六 08:10），開盤前一定更新得到。
+
+**新的 `get_restricted_stocks()` 結構**（呼叫端簽名不變，仍回 `set`）：
+
+1. `_from_finlab()` — `disposal_information` + `day_trade_short_suspension`，兩市。
+2. `_from_exchanges()` — 交易所公告頁，只在 finlab 完全沒答時用，
+   且會**警告「這條路實測會漏 14 檔中的 5 檔」**。
+3. `_from_panel()` — 歷史面板，並**明確警告落后幾天**（現在就會印
+   `DISPOSAL PANEL STALE: newest row 2026-10-21 is 5 days behind ...`）。
+4. 三條都失敗 → `NO RESTRICTION SOURCE ANSWERED`，只剩 hardcoded 兩檔。
+
+另外加了 finlab 資料新穎度檢查：處置都是**前一晚公告、隔天生效**，
+所以正常最多落後 1 天；超過 5 天就報 `FINLAB DISPOSAL STALE`。
+
+**端到端驗證**（2026-10-26 21:52 實跑）：
+
+```
+Restricted from finlab in 1.47s: 14 處置 (both markets), 14 暫停先賣後買當沖
+Restricted (cannot day-trade): 30 codes
+Loaded 30 restricted stocks
+Pre-open trim: dropped 993 below turnover floor, 30 disposal, kept 905
+Scan via Fugle (TWSE+TPEx): 905 quotes in 0.3s
+Scan done in 1.2s (898 valid quotes)
+```
+
+訊號數 **63 筆，與改之前完全相同** —— 新增排除的 13 檔本來就不是訊號，
+所以這是純保險，不犧牲邊際。
+
+### 尚未處理（保持原樣）
+
+- §1 開盤 09:00 的**實際可見延遲**仍未量到：今天四家資料源都停在 10/22，
+  要等開盤日 08:58 跑 `python gap_fade_auto.py scan` 才能量。
+- 因子面板仍停在 2026-08-19（落後 68 天），`v13_factors.py --refresh` 尚未跑。
 
 ## 8. 本輪另外修掉的兩個執行面問題
 
