@@ -24,7 +24,7 @@ v13 的兩個關鍵修正：
 | `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|sim\|now]` |
 | `v13_live_risk.py` | 上實盤前三項風險量測（報價延遲／可借券／下單延遲） |
 | `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、尚未解決的涵蓋率問題 |
-| `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh`。<br>⚠️ 只讀本地 finlab 副本，輸入不更新它就不會更新；面板過期時 `gap_fade_auto.py` 自動改餵 NaN 並印警告。見 `LIVE_READINESS.md` 第 7 節（含富果日 K 那條免費路） |
+| `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh`（向 finlab VIP 抓最新日 K → append → 重建因子）。<br>首次先 `--seed` 一次。見 `LIVE_READINESS.md` 第 7 節 |
 | `v13_build.py` `v13_train.py` `v13_bt.py` | 回測宇宙、walk-forward 訓練、回測引擎 |
 | `v13_export_model.py` | 輸出可上線模型 `v13_model.pkl`（模型與分位池，未入 repo，需自行產生） |
 | `v13_decay.py` `v13_dstune.py` `v13_frontier.py` `v13_rawedge.py` `v13_ic.py` `v13_stale2.py` | 衰退歸因、槓桿前沿、模型健全度、因子延遲 |
@@ -47,8 +47,9 @@ v13 的兩個關鍵修正：
 ## 快速開始
 
 ```bash
-# 1. 產生因子面板與 T-1 成交額。前提：本地 finlab 副本要先變新，否則這行是 no-op
-#    （實測輸入停在 2026-08-19、is_vip()=False、免費方案上限 2023-12-31）
+# 1. 產生因子面板與 T-1 成交額（向 finlab VIP 抓最新日 K，append 後重建）
+#    注意：is_vip() 在 legacy token 登入下永遠回 False，不可拿來判斷權限
+python v13_factors.py --seed      # 只需一次
 python v13_factors.py --refresh
 
 # 2. 產生可上線模型

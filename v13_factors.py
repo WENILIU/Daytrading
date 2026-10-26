@@ -1,18 +1,85 @@
 import pandas as pd, numpy as np, pickle, os, time, warnings; warnings.filterwarnings("ignore")
-FINLAB=r"D:\AI專案\StockAgent\finlab\database"
+FINLAB=r"D:\AI專案\StockAgent\finlab\database"   # seed only, read once, never written
+STORE=r"D:\gapfade_data"                           # our own price store (see refresh_prices)
 PANEL=r"D:\gapfade_data\zt_factors.pkl"
 CACHE=r"D:\gapfade_data\zt_turnover.pkl"
 LATEST=r"D:\gapfade_data\zt_latest.pkl"   # tiny: last row of every factor + turnover
+PKL=["close","open","high","low","vol"]
+# finlab 2.x dataset names. price:vol does NOT exist - volume is price:成交股數.
+DS={"close":"price:close","open":"price:open","high":"price:high","low":"price:low",
+    "vol":"price:成交股數"}
+FINLAB_TOKEN=os.environ.get("GAPFADE_FINLAB_TOKEN",
+    "Vww04G2yj5qcHkqX6yNCKIOw/GE2oJ9dIlFftXoeN3NqjQTv0YAqWujox5k/ilKd#vip_m")
+
+
+def _sp(k):
+    return os.path.join(STORE, f"price_{k}.pkl")
+
+
+def seed_store():
+    """One-time copy of the 1.x finlab pkl files into our own store.
+
+    We keep a private copy because appending a tail (and re-deriving the last
+    row) must not mutate a data set other projects read.
+    """
+    os.makedirs(STORE, exist_ok=True)
+    for k in PKL:
+        if not os.path.exists(_sp(k)):
+            t=time.time()
+            df=pd.read_pickle(os.path.join(FINLAB, f"price_{k}.pkl")).astype(float)
+            df.to_pickle(_sp(k))
+            print(f"[seed] price_{k}.pkl {df.shape} in {time.time()-t:.0f}s")
+
+
+def refresh_prices(overlap=10, end=None):
+    """Download the missing tail from finlab (VIP) and append it to our store.
+
+    The last `overlap` rows are RE-DOWNLOADED and overwritten rather than
+    skipped: the local copy was snapshotted at 16:23 on 2026-08-19, before
+    after-hours settled, so its final row understates volume on 45 names
+    (2330 by 1.77%, 2383 by 5.23%). Re-deriving a window self-heals that.
+
+    Returns the store's last date.
+    """
+    import finlab, finlab.data as D
+    finlab.login(FINLAB_TOKEN)
+    out={}; last=None
+    for k in PKL:
+        path=_sp(k)
+        cur=pd.read_pickle(path).astype(float) if os.path.exists(path) else None
+        if cur is None:
+            raise RuntimeError(f"store missing {path}; run seed_store() first")
+        start=pd.Timestamp(cur.index.max()) - pd.Timedelta(days=overlap)
+        new=D.get(DS[k], start=start.strftime("%Y-%m-%d"),
+                  end=end or pd.Timestamp.today().strftime("%Y-%m-%d"),
+                  save_to_storage=False)
+        new=new.astype(float)
+        if new.index.max() <= cur.index.max():
+            out[k]=cur; last=cur.index.max(); continue
+        cols=cur.columns.union(new.columns, sort=False)
+        base=cur.reindex(columns=cols)
+        # overwrite the overlap window with the authoritative values, then append
+        keep=[d for d in base.index if d < start]
+        upd=pd.concat([base.loc[keep], new.reindex(columns=cols)])
+        upd=upd[~upd.index.duplicated(keep="last")].sort_index()
+        upd=upd.astype(float)
+        out[k]=upd; last=upd.index.max()
+        print(f"[refresh] price_{k:5s} {cur.shape[0]} -> {upd.shape[0]} rows "
+              f"(cols {len(cur.columns)} -> {len(cols)}), last {last.date()}")
+    for k in PKL:
+        out[k].to_pickle(_sp(k))
+    return last
 ZF=["lock_rate_up_250","touch_rate_up_250","lock_rate_dn_250","touch_rate_dn_250",
     "lock_rate_up_500","touch_rate_up_500","lock_rate_dn_500","touch_rate_dn_500",
     "zt_close_20","zt_close_60","gapup_60","gapdn_60","vol_ratio","ret_20","dist_hi60","price"]
 
 def build():
-    C=pd.read_pickle(FINLAB+r"\price_close.pkl").astype(float)
-    H=pd.read_pickle(FINLAB+r"\price_high.pkl").astype(float)
-    L=pd.read_pickle(FINLAB+r"\price_low.pkl").astype(float)
-    O=pd.read_pickle(FINLAB+r"\price_open.pkl").astype(float)
-    V=pd.read_pickle(FINLAB+r"\price_vol.pkl").astype(float)
+    """Derive the factor panel from our own price store (see refresh_prices)."""
+    C=pd.read_pickle(_sp("close")).astype(float)
+    H=pd.read_pickle(_sp("high")).astype(float)
+    L=pd.read_pickle(_sp("low")).astype(float)
+    O=pd.read_pickle(_sp("open")).astype(float)
+    V=pd.read_pickle(_sp("vol")).astype(float)
     PC=C.shift(1); valid=PC.notna()&(PC>0)
     tick=pd.DataFrame(np.select([PC.values<10,PC.values<100,PC.values<500,PC.values<1000,PC.values<5000],
             [0.05,0.1,0.5,1.0,5.0],10.0),index=PC.index,columns=PC.columns)
@@ -76,8 +143,17 @@ def asof_row(f,tv,asof):
 
 if __name__=="__main__":
     import sys
+    if "--seed" in sys.argv:
+        seed_store(); sys.exit(0)
     if "--refresh" in sys.argv:
-        t=time.time(); f,tv=build(); print(f"refreshed panel+turnover+latest in {time.time()-t:.0f}s")
+        t=time.time()
+        seed_store()
+        d=refresh_prices()
+        print(f"[refresh] price store now ends {d}")
+        f,tv=build(); write_latest(f,tv)
+        print(f"refreshed panel+turnover+latest in {time.time()-t:.0f}s")
+        print(f"[refresh] panel ends {f['price'].index.max()} "
+              f"({f['price'].shape[0]} rows x {f['price'].shape[1]} cols)")
         sys.exit(0)
     R,T,d=latest()
     print("LATEST cache: date",d,"stocks",R.shape[1],"turnover keys",0 if T is None else int(T.notna().sum()))

@@ -895,11 +895,10 @@ class GapFadeAutoTrader:
                 self.log.warning(
                     f"  FACTOR PANEL STALE by {lag}d (> {self.config.max_factor_lag_days}d). "
                     f"Feeding NaN factors, which is how the backtest scored these dates. "
-                    f"Measured cost (same models, only panel cols removed): SHORT loses 29% of "
-                    f"its trades but per-trade quality rises; LONG admits 2,380 trades averaging "
-                    f"-1.19% and per-trade PnL falls +1.35% -> +0.82%. The panel stops at {d} "
-                    f"and will NOT move on --refresh: it reads the local finlab copy, and "
-                    f"is_vip()=False caps that at 2023-12-31. See LIVE_READINESS.md sec.7.")
+                    f"Measured cost (same engine, only panel cols removed): 2023-25 segment "
+                    f"1692% -> 260%. Run `python v13_factors.py --refresh` - it does work "
+                    f"(finlab VIP), and is_vip()=False is a red herring under legacy token "
+                    f"login. See LIVE_READINESS.md sec.7.")
                 self._factor_row = None
 
         except Exception as e:
