@@ -170,6 +170,22 @@ def run_backtest(capture=None, capital=CAP0, min_lot_value=0.0, min_weight=0.0, 
         ds = str(pd.Timestamp(dt).date())
         tgt = capture is not None and (ds in capture if not isinstance(capture, tuple)
                                        else capture[0] <= ds <= capture[1])
+        if tgt:
+            # D = the raw design intent: every signal the model asked for with its
+            # target weight, before any cash or whole-lot constraint is applied.
+            # A and C are both filtered by their own cash loop, so neither one is a
+            # faithful "what did the model want" list; this one is.
+            drows = []
+            for i in np.where(pos > 0)[0]:
+                rec = sub.iloc[o[i]].to_dict()
+                rec["_rank"] = int(i) + 1
+                rec["_weight"] = float(pos[i])
+                rec["_rs"] = rs
+                rec["_zm"] = float(zm[o[i]])
+                rec["_kM"] = float(kM[o[i]])
+                rec["_kT"] = float(kT[o[i]])
+                drows.append(rec)
+            got.setdefault("D", []).extend(drows)
         res = {}
         caps = {"A": eq, "C": capital}
         for mode in ["A", "C"]:

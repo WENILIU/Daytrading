@@ -11,7 +11,7 @@ Six checks:
   5. every stop/target/exit price is a price the exchange accepts
   6. the lu-tk float artefact no longer hides a stop
 """
-import io, sys, math, warnings
+import io, os, sys, math, warnings
 warnings.filterwarnings("ignore")
 sys.stdout.reconfigure(encoding="utf-8")
 import numpy as np, pandas as pd
@@ -178,6 +178,28 @@ try:
     ok(float((got - bal).abs().max()) < 1.0, "cash chain is continuous from 4,500,000",
        "max drift %.2f TWD" % float((got - bal).abs().max()))
     ok(float(bal.min()) >= 0, "cash never goes negative (no margin used)", "min cash %.0f" % float(bal.min()))
+
+    # the full design-intent file, not just the executed subset
+    ALLCSV = os.path.splitext(CSV)[0] + "_all_signals.csv"
+    if os.path.exists(ALLCSV):
+        AL = pd.read_csv(ALLCSV, encoding="utf-8-sig")
+        AL["股票"] = AL["股票"].astype(str).str.zfill(4)
+        sh = AL["方向"] == "SHORT"
+        locked = int((AL.loc[sh, "開盤價"] >= AL.loc[sh, "漲停價"]).sum()
+                     + (AL.loc[~sh, "開盤價"] <= AL.loc[~sh, "跌停價"]).sum())
+        ok(locked == 0, "no signal in the full design list opened at the limit",
+           "%d rows, %d locked" % (len(AL), locked))
+        near = AL.loc[sh, "漲停價"] - AL.loc[sh, "開盤價"]
+        t = near.apply(tsz_new)
+        print("         (%d/%d SHORT signals open within one tick of limit-up; those are the "
+              "near-lock cases the stop is set one tick below)" %
+              (int((near <= t + 1e-9).sum()), int(sh.sum())))
+        badlim = 0
+        for _, r in AL.iterrows():
+            a, b = limits(float(r["前收"]), tsz_new, True)
+            if abs(a - float(r["漲停價"])) > 1e-9 or abs(b - float(r["跌停價"])) > 1e-9:
+                badlim += 1
+        ok(badlim == 0, "every limit price in the design list matches the rule", "%d mismatches" % badlim)
 
     print("\n[5] stop/target/exit prices are exchange-legal")
     stk = T[T["股票"].str.match(r"^\d{4}$")]

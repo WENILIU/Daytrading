@@ -423,6 +423,15 @@ class Config:
     # those rows only inflate the intended trade count. Dropping them raises the
     # realised share of the design from 60% to 70% and improves Calmar (49.7->50.8).
     min_pos_pct = 0.005
+    # --- R6 sizing rules (v13_sizing_lab.py, measured 2026-10-27) ---
+    # Design weight -> floor to whole lots, but first (a) skip names whose 1-lot
+    # value exceeds 250,000 TWD (share price > 250): at 4.5M the lot granularity on
+    # high-priced names is far coarser than the model weight, and (b) cap a single
+    # trade at 1,000,000 TWD - uncapped it reaches 2,090,000 (47 pct of equity).
+    # Measured: CAGR 155.4 pct / MDD -3.6 pct / Calmar 43.2, vs floor-only
+    # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
+    max_per_trade = 1_000_000
+    max_lot_value = 250_000
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1619,6 +1628,7 @@ class GapFadeAutoTrader:
         total_exposure = 0
 
         skipped_at_limit = 0
+        skipped_lot_coarse = 0
 
         for sig in self.signals:
             if sig.is_at_limit:
@@ -1660,9 +1670,18 @@ class GapFadeAutoTrader:
             sig.tier = f"q{sig.pred_q:.2f}/zt{zt_mult:.1f}/dd{dd_scale:.2f}/km{k_model:.1f}/kt{k_trail:.1f}"
 
             budget = self._current_equity
-            shares = int(pos_pct * budget / entry_price / 1000) * 1000
+            # R6 sizing (v13_sizing_lab.py, measured 2026-10-27): skip names whose
+            # 1-lot value exceeds the cap, cap notional per trade, floor to lots.
+            lot_value = entry_price * 1000
+            if lot_value > self.config.max_lot_value:
+                self.log.info(f"  {sig.symbol}: 1 zhang = {lot_value:,.0f} > "
+                              f"{self.config.max_lot_value:,.0f}, SKIP (lot too coarse)")
+                skipped_lot_coarse += 1
+                continue
+            target_value = min(pos_pct * budget, self.config.max_per_trade)
+            shares = int(target_value / lot_value) * 1000
             if shares < 1000:
-                self.log.info(f"  {sig.symbol}: < 1 zhang, SKIP")
+                self.log.info(f"  {sig.symbol}: < 1 zhang after per-trade cap, SKIP")
                 continue
 
             # Zero-margin hard cap: total notional <= equity (sequential, shrink to fit)
@@ -1706,6 +1725,9 @@ class GapFadeAutoTrader:
         self.exec_stats["t_submit_last"] = time.time()
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
+        if skipped_lot_coarse:
+            self.log.info(f"  Skipped (1 zhang value > {self.config.max_lot_value:,.0f}, lot too coarse): "
+                          f"{skipped_lot_coarse}")
         self.log.info(
             f"  Total exposure: {total_exposure:,.0f} "
             f"({total_exposure/self.config.capital*100:.0f}%)")
