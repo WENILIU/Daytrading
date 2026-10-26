@@ -2,6 +2,7 @@
 
 > 實盤腳本：`gap_fade_auto.py`（`live` / `sim` / `now` / `scan` 四種模式；`scan` 只掃描不下單，並自己量 RISK1）
 > 實盤流程與逐階段日誌地圖：`LIVE_READINESS.md` §10
+> 流程圖（白話版，含每一步對應的 log 行）：`strategy_flow.png`，由 `python strategy_flow.py` 產生
 > 回測与研究記錄：`RESEARCH_v11_expansion.md`、`v13_final_report.txt`
 > 模型：`v13_model.pkl`（由 `v13_export_model.py` 輸出）
 
