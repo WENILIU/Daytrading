@@ -695,6 +695,23 @@ class GapFadeAutoTrader:
         stock_list = self._load_stock_list()
         self.log.info(f"  Stock universe: {len(stock_list)} codes")
 
+        # The turnover floor needs the T-1 panel. It used to be loaded only
+        # inside _score_signals, i.e. after the scan - so in live the floor at
+        # line ~768 always fell back to the volume x open proxy and never saw
+        # the real T-1 turnover the backtest used. Load it here instead.
+        self._load_reference_panels()
+
+        # Pre-open trim. Every filter below is decided by T-1 data, so a code
+        # that fails one here can never become a signal - fetching its opening
+        # price at 09:00 is pure waste. Measured 2026-10-26 against 124,596
+        # historical trades: 98.6 pct of them already pass these filters, and
+        # the 1.4 pct that do not are all prev_close < 30, which the live
+        # config excludes anyway. Cutting first is behaviour-preserving.
+        # (Tried and rejected: restricting to names that signalled in the last
+        # 30 days - 737 codes, but that only covers 54.9 pct of trades.)
+        stock_list = self._preopen_trim(stock_list)
+        self.log.info(f"  Query list after pre-open filters: {len(stock_list)} codes")
+
         # TWSE API batch scan
         t0 = time.time()
         self.exec_stats["t_scan"] = t0
@@ -877,7 +894,14 @@ class GapFadeAutoTrader:
         return self._v13_model
 
     def _load_reference_panels(self):
-        """Factor panel (already shifted to T-1) + T-1 turnover from the local store."""
+        """Factor panel (already shifted to T-1) + T-1 turnover from the local store.
+
+        Idempotent: scan_signals needs it before the pre-open trim, and
+        _score_signals calls it again on the same run.
+        """
+        if getattr(self, "_panels_loaded", False):
+            return
+        self._panels_loaded = True
         self._factor_row = None
         self._factor_lag = None
         self._t1_turnover = {}
@@ -1070,6 +1094,38 @@ class GapFadeAutoTrader:
             path = path.parent / "all_stocks.txt"
         with open(path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
+
+    def _preopen_trim(self, stock_list: list[str]) -> list[str]:
+        """Drop codes that cannot pass the scan filters, before asking for prices.
+
+        Uses only information available before 09:00: T-1 turnover (already in
+        self._t1_turnover) and today's disposal list (already in
+        self.restricted_stocks). The price filter stays in scan_signals because
+        prev_close only arrives with the quote.
+        """
+        keep = []
+        dropped = {"turnover": 0, "disposal": 0, "no_turnover_data": 0}
+        for code in stock_list:
+            if code in self.restricted_stocks:
+                dropped["disposal"] += 1
+                continue
+            t1tv = self._t1_turnover.get(code)
+            if t1tv is None:
+                # No panel row: keep it, scan_signals falls back to a
+                # volume x price proxy and decides there. Dropping it would be
+                # a stricter rule than the backtest applies.
+                dropped["no_turnover_data"] += 1
+                keep.append(code)
+                continue
+            if t1tv < self.config.min_turnover_t1:
+                dropped["turnover"] += 1
+                continue
+            keep.append(code)
+        self.log.info(
+            f"  Pre-open trim: dropped {dropped['turnover']} below turnover floor, "
+            f"{dropped['disposal']} disposal, kept {len(keep)} "
+            f"({dropped['no_turnover_data']} without panel data, decided at scan)")
+        return keep
 
     def _fugle_batch_scan(self, stock_list: list[str]) -> list[dict]:
         """Batch-query Fugle `intraday/quotes?symbol=...` for the WHOLE market.
