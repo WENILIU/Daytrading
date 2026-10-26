@@ -52,29 +52,11 @@ G = {d: g for d, g in D.groupby("date", sort=True)}
 DAYS = sorted(G)
 
 
-def lots_for(rule, w, px, cash_left, dv1=np.nan):
-    """whole lots a rule would place for one signal given remaining cash"""
-    lot = px * 1000.0
-    if rule["scale"] != 1.0:
-        w = w * rule["scale"]
-    tgt = w * CAP
-    if rule.get("cap") is not None:
-        tgt = min(tgt, rule["cap"])
-    if rule.get("dv_cap") is not None and np.isfinite(dv1) and dv1 > 0:
-        tgt = min(tgt, rule["dv_cap"] * float(dv1))
-    if rule.get("dv_skip") is not None and np.isfinite(dv1) and dv1 > 0 and lot > rule["dv_skip"] * float(dv1):
-        return 0
+from v13_sizing import lots_for as _lots_for  # single implementation, see that file
 
-    if rule.get("floor_lot") and lot > rule["floor_lot"]:
-        return 0
-    if rule.get("fixed") is not None:
-        tgt = rule["fixed"]
-    n = int(round(tgt / lot)) if rule.get("round") else int(tgt // lot)
-    if rule.get("max_lots"):
-        n = min(n, rule["max_lots"])
-    if n * lot > cash_left + 1e-9:
-        n = int(cash_left // lot)
-    return max(n, 0)
+
+def lots_for(rule, w, px, cash_left, dv1=np.nan):
+    return _lots_for(rule, w, px, cash_left, dv1, capital=CAP)
 
 
 def run(rule, day_list=None):
@@ -188,7 +170,7 @@ WD = [d for d in DAYS if WS <= d <= WU]
 print("\n=== 近 3 個月窗口 %s ~ %s：本腳本獨立實作（供 daytrading.csv 對照）===" % (WS, WU))
 for rule in RULES:
     nm = rule.get("name", "")
-    if nm.startswith("1 ") or nm.startswith("R6") or nm.startswith("R7"):
+    if nm.startswith("1 ") or nm.startswith("R6") or nm.startswith("R7") or nm.startswith("R9"):
         r = run(rule, WD)
         print("  %-40s 筆數 %5d  區間報酬 %8.2f%%  單筆最大 %6.1f 萬  曝險 %.1f%%"
               % (r["name"], r["trades"], r["total"], r["max_notional_w"], r["expo"]))

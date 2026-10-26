@@ -31,6 +31,11 @@ ap.add_argument("--max-dv1-frac", type=float, default=None,
 ap.add_argument("--min-range", type=float, default=0.001)
 ap.add_argument("--out", default=OUT)
 a = ap.parse_args()
+import v13_sizing as S
+RULE = {"scale": 1.0, "cap": a.max_per_trade, "floor_lot": a.max_lot_value}
+if a.max_dv1_frac:
+    RULE["dv_cap"] = a.max_dv1_frac
+
 
 cv, got, _ = run_backtest(capture=(a.since, a.until), capital=a.capital,
                           min_weight=a.min_weight, kmode="one", tmode="on",
@@ -86,33 +91,30 @@ for _, r in A.iterrows():
     dv1 = float(TO1.at[d, code]) if code in TO1.columns and d in TO1.index else np.nan
     need = float(r["_weight"]) * a.capital
     if a.sizing == "r6":
-        # R6 (adopted for live, see STRATEGY.md s2 sizing lab): cap the notional of a
-        # single trade, skip names whose 1-lot value is coarser than any sensible
-        # target, then floor to whole lots. Same rule as v13_sizing_lab.py rule R6.
-        if lot > a.max_lot_value:
+        # Single implementation shared with the lab and the live trader (v13_sizing.R9).
+        # Calling it twice - once ignoring the day's cash - is how "縮量" is detected.
+        n_full = S.lots_for(RULE, float(r["_weight"]), pr, a.capital, dv1, capital=a.capital)
+        n = S.lots_for(RULE, float(r["_weight"]), pr, left, dv1, capital=a.capital)
+        lot = pr * 1000.0
+        if n <= 0:
             sh = 0.0; notional = 0.0
-            status = "跳過:1張市值過高(1張=%.1f 萬 > %.1f 萬)" % (lot / 1e4, a.max_lot_value / 1e4)
-        else:
-            tgt = min(need, a.max_per_trade)
-            if a.max_dv1_frac is not None and np.isfinite(dv1) and dv1 > 0:
-                tgt = min(tgt, a.max_dv1_frac * dv1)
-            n = int(tgt // lot)
-            if n < 1:
-                sh = 0.0; notional = 0.0
+            reason = S.skip_reason(RULE, float(r["_weight"]), pr, dv1, capital=a.capital)
+            if reason == "整張不足":
+                tgt = min(float(r["_weight"]) * a.capital, RULE.get("cap") or 1e18)
+                if a.max_dv1_frac and np.isfinite(dv1) and dv1 > 0:
+                    tgt = min(tgt, a.max_dv1_frac * dv1)
                 status = "跳過:整張不足(需 %.1f 萬, 1張=%.1f 萬)" % (tgt / 1e4, lot / 1e4)
-            elif n * lot > left + 1e-9:
-                n = int(left // lot)
-                if n < 1:
-                    sh = 0.0; notional = 0.0
-                    status = "跳過:當日資金已滿"
-                else:
-                    sh = n * 1000.0; notional = sh * pr
-                    status = "可下(縮量:當日現金已滿)"
             else:
-                sh = n * 1000.0; notional = sh * pr
-                status = "可下"
-            if sh > 0:
-                left -= notional
+                status = "跳過:" + (reason or "當日資金已滿")
+        elif n < n_full:
+            sh = n * 1000.0; notional = sh * pr
+            status = "可下(縮量:當日現金已滿)"
+        else:
+            sh = n * 1000.0; notional = sh * pr
+            status = "可下"
+        if sh > 0:
+            left -= notional
+
     else:  # floor-only view: take whatever the engine C mode actually placed
         hit = placed.get((ds, code))
         if hit is not None:

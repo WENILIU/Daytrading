@@ -26,16 +26,20 @@ import finlab
 from finlab import data as fdata
 
 from v13_engine import run_backtest, stats, exit_of, exit_of_legal, CAP0, COST, SLO
+import v13_sizing as S
 
 CFG = dict(kmode="one", tmode="on", min_weight=0.005, min_range=0.001)
 
 
 def build_table(date):
     cv, got, _ = run_backtest(capture=date, capital=CAP0, **CFG)
-    A = got["A"]
+    # D = raw design intent (before any cash / whole-lot filter). A is itself
+    # filtered by its own cash loop, so it understates what the model asked for.
+    A = got["D"]
     src = re.search(r'FINLAB_TOKEN = "([^"]+)"', open("gap_fade_auto.py", encoding="utf-8").read()).group(1)
     finlab.login(src)
     vol = pd.DataFrame(fdata.get("price:成交股數")); turn = pd.DataFrame(fdata.get("price:成交金額"))
+    TO1 = pd.read_pickle(r"D:\gapfade_data\zt_turnover.pkl").shift(1)
     vol.index = pd.to_datetime(vol.index); turn.index = pd.to_datetime(turn.index)
     d = pd.Timestamp(date)
     rem = CAP0
@@ -43,6 +47,8 @@ def build_table(date):
     for _, r in A.sort_values("_rank").iterrows():
         pr = float(r["entry"]); pos = float(r["_weight"])
         code = str(r["stock"])
+        # T-1 turnover must exist before the order size is decided
+        dv1 = float(TO1.at[d, code]) if code in TO1.columns and d in TO1.index else np.nan
         lu = float(r["lu"]); ld = float(r["ld"]); tk = float(r["tick"]); tpv = float(r["tp"])
         ex, slp, tpp, reason, gross = exit_of_legal(r["direction"], pr, float(r["day_high"]),
                                                     float(r["day_low"]), float(r["day_close"]),
@@ -52,18 +58,17 @@ def build_table(date):
         else:
             sl_raw = max(pr * (1 - SLO), ld + tk); tp_raw = pr * (1 + tpv)
         net = gross - 2 * COST
-        sh = float(int(pos * CAP0 / (pr * 1000)) * 1000)
+        # same order rule as the live trader and the published trade list
+        n_full = S.lots_for(S.R9, pos, pr, CAP0, dv1, capital=CAP0)
+        n = S.lots_for(S.R9, pos, pr, rem, dv1, capital=CAP0)
+        sh = n * 1000.0
         status = "可下"
-        if sh < 1000:
-            status = "跳過:整張不足(需 %.1f 萬, 1張=%.1f 萬)" % (pos * CAP0 / 1e4, pr * 1000 / 1e4)
+        if n <= 0:
             sh = 0.0
-        elif sh * pr > rem:
-            sh2 = float(int(rem / (pr * 1000)) * 1000)
-            if sh2 < 1e-9:
-                status = "跳過:資金已滿(剩 %.1f 萬)" % (rem / 1e4)
-                sh = 0.0
-            else:
-                sh = sh2; status = "可下(縮量)"
+            reason = S.skip_reason(S.R9, pos, pr, dv1, capital=CAP0)
+            status = "跳過:" + (reason or "資金已滿")
+        elif n < n_full:
+            status = "可下(縮量)"
         if sh > 0:
             rem -= sh * pr
         dv = float(vol.at[d, code]) if code in vol.columns and d in vol.index else np.nan
