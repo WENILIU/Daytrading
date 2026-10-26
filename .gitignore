@@ -1,17 +1,8 @@
-# Data files (too large for GitHub)
-*.pkl
-*.csv
-*.png
-*.jpg
-
-# Python
-__pycache__/
-*.pyc
-.env
-
-# OS
-Thumbs.db
-.DS_Store
-
-# Keep important small data
-!valid_stocks.txt
+'
+# scratch scripts written ad hoc during research
+_*
+# runtime output
+trading_logs/
+equity_state.json
+signal_history.json
+trail30_state.json

@@ -40,12 +40,31 @@ import comtypes.gen.SKCOMLib as sk
 # ============================================================
 
 
+DISPOSAL_PANEL = r"D:\gapfade_data\disposal_panel_full.pkl"
+
+
 def get_restricted_stocks() -> set:
-    """Get today's disposal stocks (cannot do day trading).
-    Uses finlab etl:disposal_stock_filter if available, else exchange API."""
+    """Today's disposal stocks (cannot day-trade).
+
+    Primary source: disposal_panel_full.pkl, built from the OFFICIAL TWSE punish +
+    TPEx disposal announcements (both markets, 47,714 date x stock rows).
+    The old finlab/TWSE-only path missed 上櫃 stocks entirely.
+    """
+    # Method 0: authoritative panel (TWSE + TPEx)
+    try:
+        import pandas as _pd
+        from datetime import date as _date
+        dp = _pd.read_pickle(DISPOSAL_PANEL)
+        dp["date"] = _pd.to_datetime(dp["date"]); dp["stock"] = dp["stock"].astype(str)
+        hit = dp.loc[dp["date"] == _pd.Timestamp(_date.today()), "stock"]
+        if len(hit):
+            return set(hit.tolist())
+    except Exception:
+        pass
+
     restricted = set()
-    
-    # Method 1: finlab (most reliable)
+
+    # Method 1: finlab (TWSE only - incomplete for TPEx)
     try:
         from finlab import data as fdata
         from datetime import date
@@ -105,51 +124,38 @@ class Config:
     # --- Capital ---
     capital = 4_500_000
 
-    # --- Signal detection (9:00) ---
-    gap_threshold = 0.05
-    min_price = 30
-    max_price = 225
-    min_dollar_volume_t1 = 3_000_000  # T-1 turnover >= 3M TWD
+    # ===== v13 SIGNAL (9:00, market-adjusted opening gap) =====
+    gap_short_min = 0.015           # SHORT: adj_gap >= +1.5 pct
+    gap_long_min = 0.05             # LONG:  adj_gap <= -5.0 pct
+    min_price = 30                  # prev_close >= 30 TWD
+    min_turnover_t1 = 10_000_000    # T-1 daily turnover >= 10M TWD
+    benchmark_no = "0050"           # opening-gap benchmark, observable at 09:00
 
-    # --- Entry: 9:00 immediate (no confirmation wait) ---
-    confirm_wait_minutes = 0
-    confirm_drop_min = 0.0  # No confirmation needed
+    # ===== v13 MODEL (exported by v13_export_model.py) =====
+    model_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\v13_model.pkl")
+    pred_q_min = 0.20               # skip bottom 20 pct of predicted PnL
 
-    # --- Position sizing: Model B/C (Market + Stock Regime Dynamic) ---
-    # Model B: market-only. CAGR 165%, MDD -5.5% (WF validated)
-    # Model C: market + stock. CAGR ~99%, MDD -5.2% (with 處置+借券+流動性 filters)
-    # Switch: "B" = market only, "C" = market + stock (recommended)
-    position_model = "C"
-    pos_min_pct = 0.02   # Minimum position (low-quality signals)
-    pos_max_pct = 0.12   # Maximum position (highest-quality signals)
-    base_position_pct = 0.05  # Fallback (unused, kept for compat)
-    long_position_pct = 0.05  # Fallback (unused, kept for compat)
-
-    # --- Exit ---
-    stop_loss_pct = 0.05
-    take_profit_pct = 0.12  # TP for strong signals (score >= threshold)
-    take_profit_low_pct = 0.07  # TP for weak signals (score < threshold, same as baseline)
-    tp_score_threshold = 3  # Score cutoff for TP switch
+    # ===== v13 EXIT =====
+    stop_loss_pct = 0.04            # SL 4 pct, capped by price limit (dynamic)
+    take_profit_pct = 0.12          # TP low
+    take_profit_high_pct = 0.20     # TP high when q1 >= q1_tp_threshold
+    q1_tp_threshold = 0.85
     force_exit_time = "13:25"
 
-    # --- Limits ---
-    max_daily_positions = 15
-    max_daily_exposure = 0.75  # 5% signals cap
-    max_total_exposure = 1.50  # Total cap including 3-5% signals (requires margin)
-    min_score_threshold = 1    # Skip signals with score < this (low quality)
-
-    # --- 3-5% Gap Module (activates only during market drawdown) ---
-    gap_threshold_low = 0.03   # Lower gap threshold
-    mkt_dd_threshold = -0.05   # Only scan 3-5% when market drawdown < -5%
-    pos_low_pct = 0.05         # Flat position for 3-5% signals
-    vol_targeting = True         # Scale positions inversely with market vol
-    dir_concentration_limit = 0.80  # If >80% same direction, halve positions
-    equity_dd_threshold = 0.025    # Reduce positions when equity DD > 2.5% from peak
-    equity_dd_scale = 0.3          # Scale factor when in drawdown (30% of normal)
+    # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
+    position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
+    pos_cap_pct = 0.25              # hard cap per name
+    max_total_exposure = 1.00       # ZERO MARGIN: total notional <= equity
+    zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
+    zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
+    dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
+    dd_th2 = 0.012; dd_scale2 = 0.12   # equity DD > 1.2 pct  -> x0.12
+    k_model_scale = 0.02            # k_model = clip(0.5 + pred/0.02, 0, 2)
+    k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
     # --- Cost ---
-    cost_per_trade = 0.00109  # 0.2%%x1.7折 + 當沖稅減半
+    cost_per_trade = 0.00109  # 0.2 pct x1.7 zhe + day-trade tax halved, per side
 
     # --- Fugle (real-time scanning) ---
     fugle_api_key = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
@@ -174,14 +180,20 @@ class Direction(Enum):
 
 def get_tick_size(price: float) -> float:
     """TWSE minimum tick size by price level."""
-    if price < 50:
+    if price < 10:
         return 0.05
-    elif price < 500:
+    elif price < 50:
+        return 0.05
+    elif price < 100:
         return 0.1
-    elif price < 5000:
+    elif price < 500:
         return 0.5
-    else:
+    elif price < 1000:
         return 1.0
+    elif price < 5000:
+        return 5.0
+    else:
+        return 10.0
 
 
 def calc_price_limits(prev_close: float) -> tuple:
@@ -250,6 +262,16 @@ class Signal:
     dieding: float = 0.0
     is_at_limit: bool = False
     is_low_gap: bool = False
+    # --- v13 model / execution telemetry ---
+    zt_dist: float = 0.0
+    prev_turnover: float = 0.0
+    pred: float = 0.0
+    pred_q: float = 0.0
+    q1: float = 0.0
+    base_pos: float = 0.0
+    submit_ts: float = 0.0
+    ack_ts: float = 0.0
+    ack_code: int = -999
 
 
 
@@ -497,9 +519,11 @@ class GapFadeAutoTrader:
                     return -1
                 def OnOrderResult(self_inner, *args):
                     trader_ref.log.info(f"  [OrderResult] {args}")
+                    trader_ref._note_ack(str(args))
                     return -1
                 def OnFill(self_inner, *args):
                     trader_ref.log.info(f"  [FILL] {args}")
+                    trader_ref._note_fill(str(args))
                     return -1
                 def OnCancel(self_inner, *args):
                     trader_ref.log.info(f"  [CANCEL] {args}")
@@ -626,6 +650,8 @@ class GapFadeAutoTrader:
 
         # TWSE API batch scan
         t0 = time.time()
+        self.exec_stats["t_scan"] = t0
+        self.exec_stats["t_open"] = self.exec_stats.get("t_open") or t0
         raw_data = self._twse_batch_scan(stock_list)
         scan_time = time.time() - t0
         self.log.info(f"  TWSE scan: {len(raw_data)} quotes in {scan_time:.1f}s")
@@ -633,6 +659,7 @@ class GapFadeAutoTrader:
         # Process: filter + gap detection
         total_valid = 0
         candidates = []
+        self._nb_reject = 0
         self.market_gap = 0.0
         gaps_for_market = []
 
@@ -655,13 +682,15 @@ class GapFadeAutoTrader:
 
                 total_valid += 1
 
-                # Price filter
-                if prev_close < self.config.min_price or prev_close > self.config.max_price:
+                # Price filter (v13: prev_close >= 30, no upper cap)
+                if prev_close < self.config.min_price:
                     continue
 
-                # Dollar volume filter (auction volume x price >= threshold)
-                dollar_vol = volume * open_price
-                if dollar_vol < self.config.min_dollar_volume_t1:
+                # T-1 daily turnover filter (v13: prev_turnover >= 10M TWD)
+                t1tv = self._t1_turnover.get(stock_no)
+                if t1tv is None:
+                    t1tv = volume * open_price  # proxy when panel unavailable
+                if t1tv < self.config.min_turnover_t1:
                     continue
 
                 # Skip restricted (處置股)
@@ -670,12 +699,16 @@ class GapFadeAutoTrader:
 
                 # Skip non-borrowable stocks (cannot short-sell)
                 if self.borrowable_stocks is not None and stock_no not in self.borrowable_stocks:
+                    self._nb_reject += 1
                     continue
 
                 # Calculate gap
                 raw_gap = (open_price - prev_close) / prev_close
 
-                # Market gap from major stocks
+                # v13 benchmark: 0050 opening gap (observable at 09:00)
+                if stock_no == self.config.benchmark_no:
+                    self.benchmark_gap = raw_gap
+                # legacy fallback (7 large caps) - NOT the v13 definition
                 if stock_no in ("2330", "2317", "2454", "2303", "6505", "3711", "2412"):
                     gaps_for_market.append(raw_gap)
 
@@ -685,14 +718,21 @@ class GapFadeAutoTrader:
                     "openPrice": open_price,
                     "previousClose": prev_close,
                     "raw_gap": raw_gap,
+                    "prev_turnover": float(t1tv),
                 })
             except (ValueError, TypeError):
                 continue
 
-        # Calculate market gap
-        if gaps_for_market:
+        # Market gap = 0050 opening gap (v13). Fallback only when 0050 unavailable.
+        if getattr(self, "benchmark_gap", None) is not None:
+            self.market_gap = self.benchmark_gap
+            self.log.info(f"  Market gap (0050 open, v13 def): {self.market_gap*100:+.2f}%")
+        elif gaps_for_market:
             self.market_gap = sum(gaps_for_market) / len(gaps_for_market)
-        self.log.info(f"  Market gap: {self.market_gap*100:+.2f}%")
+            self.log.warning(f"  Market gap FALLBACK (7 large caps, NOT v13 def): {self.market_gap*100:+.2f}%")
+        else:
+            self.market_gap = 0.0
+            self.log.warning("  Market gap unavailable -> using 0")
 
         # Filter by adjusted gap
         signals = []
@@ -700,9 +740,9 @@ class GapFadeAutoTrader:
             adj_gap = c["raw_gap"] - self.market_gap
 
             direction = None
-            if adj_gap > self.config.gap_threshold:
+            if adj_gap >= self.config.gap_short_min:
                 direction = Direction.SHORT
-            elif adj_gap < -self.config.gap_threshold:
+            elif adj_gap <= -self.config.gap_long_min:
                 direction = Direction.LONG
 
             if direction is None:
@@ -712,59 +752,226 @@ class GapFadeAutoTrader:
                 symbol=c["symbol"], name=c["name"],
                 direction=direction, open_price=c["openPrice"],
                 prev_close=c["previousClose"], raw_gap=c["raw_gap"],
-                adj_gap=adj_gap,
+                adj_gap=adj_gap, prev_turnover=c.get("prev_turnover", 0.0),
             ))
 
-        # Calculate price limits and mark at-limit signals
+        # Price limits + zt_dist + opening-lock flag (v13 excludes opening-locked)
         for sig in signals:
             lu, ld = calc_price_limits(sig.prev_close)
             sig.zhangting = lu
             sig.dieding = ld
-            if sig.direction == Direction.SHORT and abs(sig.open_price - lu) < 0.01:
-                sig.is_at_limit = True
-            elif sig.direction == Direction.LONG and abs(sig.open_price - ld) < 0.01:
-                sig.is_at_limit = True
-
-        # --- 3-5% Gap Module (only during market drawdown) ---
-        self.market_drawdown = self._calc_market_drawdown()
-        if self.market_drawdown < self.config.mkt_dd_threshold:
-            self.log.info(f"  Market DD {self.market_drawdown*100:.1f}% < {self.config.mkt_dd_threshold*100:.0f}%: scanning 3-5% gaps")
-            low_signals = []
-            for c in candidates:
-                adj_gap = c["raw_gap"] - self.market_gap
-                if self.config.gap_threshold_low <= abs(adj_gap) < self.config.gap_threshold:
-                    direction = Direction.SHORT if adj_gap > 0 else Direction.LONG
-                    sig = Signal(
-                        symbol=c["symbol"], name=c["name"],
-                        direction=direction, open_price=c["openPrice"],
-                        prev_close=c["previousClose"], raw_gap=c["raw_gap"],
-                        adj_gap=adj_gap,
-                    )
-                    sig.is_low_gap = True
-                    lu, ld = calc_price_limits(sig.prev_close)
-                    sig.zhangting = lu
-                    sig.dieding = ld
-                    low_signals.append(sig)
-            self.log.info(f"  3-5% signals found: {len(low_signals)}")
-            signals.extend(low_signals)
+            if sig.direction == Direction.SHORT:
+                sig.zt_dist = (lu - sig.open_price) / sig.open_price
+                sig.is_at_limit = sig.open_price >= lu - 1e-9
+            else:
+                sig.zt_dist = (sig.open_price - ld) / sig.open_price
+                sig.is_at_limit = sig.open_price <= ld + 1e-9
+        n_locked = sum(1 for s in signals if s.is_at_limit)
+        self.log.info(f"  Opening-locked (excluded by v13): {n_locked}")
+        if self.borrowable_stocks is None:
+            self.log.warning("  Borrowable list UNAVAILABLE - SHORT leg unverified (pre-live risk #2)")
         else:
-            self.log.info(f"  Market DD {self.market_drawdown*100:.1f}%: 3-5% module OFF")
+            self.log.info(f"  Rejected for no-borrowable: {self._nb_reject}")
 
-        # Compute stock-level features for Model C
-        if self.config.position_model == "C":
-            self._compute_stock_features(signals)
 
-        signals.sort(key=lambda s: abs(s.adj_gap), reverse=True)
-        self.signals = signals[:self.config.max_daily_positions]
+        # v13: model scoring + pred_q filter. NO top-N cap, NO gap-size ranking.
+        self.signals = self._score_signals(signals)
+        self.signals.sort(key=lambda x: -x.pred_q)
 
         self.log.info(f"  Scan done in {time.time()-t0:.1f}s ({total_valid} valid quotes)")
-        self.log.info(f"  Found {len(signals)} signals, keeping top {len(self.signals)}:")
-        for s in self.signals:
+        self.log.info(f"  Raw gap signals {len(signals)} -> model-selected {len(self.signals)} "
+                      f"(pred_q >= {self.config.pred_q_min}):")
+        for sg in self.signals:
             self.log.info(
-                f"    {s.symbol} {s.name:<8} {s.direction.value:<5} "
-                f"gap={s.adj_gap*100:+.1f}%")
+                f"    {sg.symbol} {sg.name:<8} {sg.direction.value:<5} "
+                f"gap={sg.adj_gap*100:+.1f}% zt_dist={sg.zt_dist*100:4.1f}% "
+                f"pred={sg.pred*100:+.2f}% q={sg.pred_q:.3f} q1={sg.q1:.3f} base={sg.base_pos*100:.0f}%")
 
         return self.signals
+
+    # ----------------------------------------------------------
+    # v13 MODEL SCORING (replaces Model B/C hand-scored regime)
+    # ----------------------------------------------------------
+    _v13_model = None
+    _factor_row = None
+    _t1_turnover: dict = {}
+
+    def _load_v13_model(self):
+        if self._v13_model is not None:
+            return self._v13_model
+        p = Path(self.config.model_path)
+        if not p.exists():
+            self.log.error(f"  v13 model missing: {p} -> no signals today")
+            return None
+        import pickle as _pk
+        self._v13_model = _pk.load(open(p, "rb"))
+        self.log.info(f"  v13 model loaded: trained through {self._v13_model['train_end']}, "
+                      f"pool={len(self._v13_model['pool2'])}")
+        return self._v13_model
+
+    def _load_reference_panels(self):
+        """Factor panel (already shifted to T-1) + T-1 turnover from the local store."""
+        self._factor_row = None
+        self._t1_turnover = {}
+        try:
+            import v13_factors as VF
+            # tiny latest-row cache (~200KB) instead of the 1.7GB panel -> 9:00 safe
+            row, tvrow, d = VF.latest()
+            self._factor_row = row
+            if tvrow is not None:
+                self._t1_turnover = {str(k): float(v) for k, v in tvrow.dropna().items()}
+            lag = (pd.Timestamp(datetime.now().date()) - pd.Timestamp(d)).days
+            self.log.info(f"  Factor panel as-of {d} (lag {lag}d), turnover keys {len(self._t1_turnover)}")
+            if lag > 7:
+                self.log.warning(f"  FACTOR PANEL STALE by {lag}d. Measured cost: ~3pct edge loss at 20d, "
+                                 f"~11pct at 60d. Refresh D:\\AI專案\\StockAgent\\finlab\\database first.")
+        except Exception as e:
+            self.log.warning(f"  Factor panel unavailable ({e}) -> model uses NaN factors")
+
+    def _signal_history(self) -> dict:
+        """{symbol: [iso dates]} of raw gap signals, for stock_signals_30d / had_signal_yesterday."""
+        p = Path(self.config.log_dir) / "signal_history.json"
+        if p.exists():
+            try:
+                import json as _j
+                return _j.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+        return {}
+
+    def _record_signal_history(self, signals):
+        p = Path(self.config.log_dir) / "signal_history.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        hist = self._signal_history()
+        today = datetime.now().strftime("%Y-%m-%d")
+        for sig in signals:
+            hist.setdefault(sig.symbol, [])
+            if today not in hist[sig.symbol]:
+                hist[sig.symbol].append(today)
+            hist[sig.symbol] = hist[sig.symbol][-120:]
+        import json as _j
+        p.write_text(_j.dumps(hist), encoding="utf-8")
+
+    def _hist_counts(self) -> dict:
+        hist = self._signal_history()
+        today = pd.Timestamp(datetime.now().date())
+        out = {}
+        for sym, ds in hist.items():
+            dd = pd.to_datetime(pd.Series(ds))
+            gap_days = (today - dd).dt.days
+            c30 = int((gap_days <= 30).sum())
+            hy = int(gap_days.min() == 1) if len(gap_days) else 0
+            out[sym] = (c30, hy)
+        return out
+
+    def _trail_state_path(self) -> Path:
+        return Path(self.config.log_dir) / "trail30_state.json"
+
+    def _trail30(self, direction: str) -> float:
+        """Trailing-30-trade realised PnL by direction (k_trail input).
+        Seeded from the model export, updated from live results each day."""
+        import json as _j
+        p = self._trail_state_path()
+        if p.exists():
+            try:
+                st = _j.loads(p.read_text(encoding="utf-8"))
+                vals = st.get(direction, [])
+                if len(vals) >= 10:
+                    return float(sum(vals[-30:]) / len(vals[-30:]))
+            except Exception:
+                pass
+        m = self._v13_model
+        if m:
+            return float(m["trailing30"].get(direction, 0.0))
+        return 0.0
+
+    def _update_trail30(self, trades: list):
+        """Append today's realised per-trade PnL to the rolling state."""
+        import json as _j
+        if not trades:
+            return
+        p = self._trail_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        st = {}
+        if p.exists():
+            try:
+                st = _j.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                st = {}
+        for direction, pnl in trades:
+            st.setdefault(direction, []).append(float(pnl))
+            st[direction] = st[direction][-60:]
+        p.write_text(_j.dumps(st), encoding="utf-8")
+        self.log.info(f"  trail30 updated: " + " ".join(
+            f"{k}={sum(v[-30:])/len(v[-30:])*100:+.2f}%(n={len(v[-30:])})" for k, v in st.items()))
+
+    @staticmethod
+    def _quantile(pool: np.ndarray, vals: np.ndarray) -> np.ndarray:
+        p = np.sort(np.asarray(pool, dtype=float))
+        return np.searchsorted(p, np.asarray(vals, dtype=float), side="left") / len(p)
+
+    def _score_signals(self, signals: list) -> list:
+        """Run the two-pass walk-forward model, attach pred/q1/base_pos, drop pred_q < min."""
+        import numpy as _np
+        m = self._load_v13_model()
+        if m is None or not signals:
+            return []
+        self._load_reference_panels()
+        fac = self._factor_row
+        mf = getattr(self, "_market_features", {})
+        hc = self._hist_counts()
+        today = datetime.now()
+        rows = []
+        for sig in signals:
+            c30, hy = hc.get(sig.symbol, (0, 0))
+            r = {
+                "adj_gap": sig.adj_gap, "abs_gap": abs(sig.adj_gap), "zt_dist": sig.zt_dist,
+                "market_ret": self.market_gap,
+                "mkt_vol_5d": mf.get("vol_5d", 0.0), "mkt_drawdown": mf.get("drawdown", 0.0),
+                "prev3_market_ret": mf.get("ret_3d", 0.0), "consec_down_days": mf.get("consec_down", 0),
+                "signals_today": len(signals), "stock_signals_30d": c30, "had_signal_yesterday": hy,
+                "month": today.month, "weekday": today.weekday(), "price": sig.prev_close,
+            }
+            if fac is not None and sig.symbol in fac.index:
+                for c in fac.columns:
+                    if c == "price":
+                        continue
+                    v = fac.loc[sig.symbol, c]
+                    r[c] = float(v) if pd.notna(v) else _np.nan
+            rows.append(r)
+        X = pd.DataFrame(rows)
+        pr1 = _np.full(len(X), _np.nan); pr2 = _np.full(len(X), _np.nan)
+        dirs = _np.array([s.direction.value for s in signals])
+        for direc in ("SHORT", "LONG"):
+            mask = dirs == direc
+            if not mask.any():
+                continue
+            for key, target in (("prod_models", 1), ("prod_models2", 2)):
+                e = m[key][direc]
+                XX = X.loc[mask, e["cols"]].apply(pd.to_numeric, errors="coerce").values
+                pv = e["model"].predict(XX)
+                if target == 1:
+                    pr1[mask] = pv
+                else:
+                    pr2[mask] = pv
+        q1 = self._quantile(m["pool1"], _np.nan_to_num(pr1, nan=0.0))
+        q2 = self._quantile(m["pool2"], _np.nan_to_num(pr2, nan=0.0))
+        lad = _np.asarray(m["ladder"], dtype=float); cuts = list(m["cuts"])
+        keep = []
+        for i, sig in enumerate(signals):
+            sig.pred = float(pr2[i]) if _np.isfinite(pr2[i]) else 0.0
+            sig.q1 = float(q1[i]); sig.pred_q = float(q2[i])
+            b = int(_np.searchsorted(_np.asarray(cuts), sig.pred_q, side="right")) - 1
+            sig.base_pos = float(lad[max(0, min(b, len(lad) - 1))])
+            sig._tp_pct = m["tp_high"] if sig.q1 >= m["q1_tp_threshold"] else m["tp_low"]
+            sig._trail30 = m["trailing30"].get(sig.direction.value, 0.0)
+            if sig.pred_q < self.config.pred_q_min:
+                continue
+            keep.append(sig)
+        self._record_signal_history(signals)
+        self.log.info(f"  Model scored {len(signals)} candidates -> kept {len(keep)}; "
+                      f"TP20 share {sum(1 for k in keep if k._tp_pct >= 0.2)/max(1,len(keep))*100:.0f}%")
+        return keep
 
     def _load_stock_list(self) -> list[str]:
         """Load stock codes from valid_stocks.txt."""
@@ -833,62 +1040,55 @@ class GapFadeAutoTrader:
             # Use open price as entry (immediate execution at market open)
             entry_price = sig.open_price
 
-            # Position sizing: Model C for 5%+, flat for 3-5%
-            abs_gap = abs(sig.adj_gap)
-            if getattr(sig, 'is_low_gap', False):
-                pos_pct = self.config.pos_low_pct
-                sig.tier = f"LOW{int(pos_pct*100)}%"
+            # ===== v13 sizing: base_pos x zt_mult x dd_scale x k_model x k_trail =====
+            if sig.zt_dist < self.config.zt_bp1:
+                zt_mult = self.config.zt_m1
+            elif sig.zt_dist < self.config.zt_bp2:
+                zt_mult = self.config.zt_m2
             else:
-                pos_pct = self._calc_position_score(sig)
-                # Skip low-quality signals
-                if pos_pct <= self.config.pos_min_pct and getattr(sig, '_score', 0) < self.config.min_score_threshold:
-                    self.log.info(f"  {sig.symbol}: score={getattr(sig, '_score', 0)} < {self.config.min_score_threshold}, SKIP")
-                    continue
-                sig.tier = f"B{int(pos_pct*100)}%"
-            sig.tier_multiplier = pos_pct / 0.05  # Normalize for logging
+                zt_mult = 1.0
 
-            # Equity drawdown control: reduce positions when in drawdown
-            if not hasattr(self, '_risk_scale'):
-                self._risk_scale = 1.0
-                dd_from_peak = (self._current_equity - self._peak_equity) / self._peak_equity
-                if dd_from_peak < -self.config.equity_dd_threshold:
-                    self._risk_scale = self.config.equity_dd_scale
-                    self.log.info(f"  EQUITY DD CONTROL: drawdown {dd_from_peak*100:.1f}%, scaling to {self.config.equity_dd_scale*100:.0f}%")
-                elif dd_from_peak < -self.config.equity_dd_threshold * 0.5:
-                    self._risk_scale = (1 + self.config.equity_dd_scale) / 2
-                    self.log.info(f"  EQUITY DD CONTROL: drawdown {dd_from_peak*100:.1f}%, scaling to {self._risk_scale*100:.0f}%")
+            peak = max(self._peak_equity, self._current_equity)
+            dd = (self._current_equity - peak) / peak if peak > 0 else 0.0
+            if dd < -self.config.dd_th2:
+                dd_scale = self.config.dd_scale2
+            elif dd < -self.config.dd_th1:
+                dd_scale = self.config.dd_scale1
+            else:
+                dd_scale = 1.0
 
-            # Calculate position
-            position_value = self.config.capital * pos_pct * self._risk_scale
-            shares = int(position_value / entry_price / 1000) * 1000
+            k_model = min(2.0, max(0.0, 0.5 + sig.pred / self.config.k_model_scale))
+            t30 = self._trail30(sig.direction.value)
+            k_trail = min(2.0, max(0.3, 0.5 + t30 / self.config.k_trail_scale))
 
+            pos_pct = min(sig.base_pos * self.config.position_multiplier * zt_mult
+                          * dd_scale * k_model * k_trail, self.config.pos_cap_pct)
+            if pos_pct <= 0:
+                continue
+            sig._pos_pct = pos_pct
+            sig.tier = f"q{sig.pred_q:.2f}/zt{zt_mult:.1f}/dd{dd_scale:.2f}/km{k_model:.1f}/kt{k_trail:.1f}"
+
+            budget = self._current_equity
+            shares = int(pos_pct * budget / entry_price / 1000) * 1000
             if shares < 1000:
                 self.log.info(f"  {sig.symbol}: < 1 zhang, SKIP")
                 continue
 
-            # Check exposure limit
+            # Zero-margin hard cap: total notional <= equity (sequential, shrink to fit)
+            room = budget * self.config.max_total_exposure - total_exposure
+            if room < shares * entry_price:
+                shares = int(max(0.0, room) / (entry_price * 1000)) * 1000
+                if shares < 1000:
+                    self.log.info(f"  {sig.symbol}: exposure cap reached, SKIP")
+                    continue
             actual_value = shares * entry_price
-            # Direction concentration: reduce size if all same direction
-            if not hasattr(self, '_dir_scale'):
-                self._dir_scale = 1.0
-                if len(self.signals) >= 3:
-                    short_count = sum(1 for s in self.signals if s.direction == Direction.SHORT)
-                    short_pct = short_count / len(self.signals)
-                    if short_pct > self.config.dir_concentration_limit or short_pct < (1 - self.config.dir_concentration_limit):
-                        self._dir_scale = 0.5
-                        self.log.info(f"  Direction concentrated ({short_pct*100:.0f}% SHORT): scaling to 50%")
-            cap = self.config.max_total_exposure if getattr(sig, 'is_low_gap', False) else self.config.max_daily_exposure
-            if total_exposure + actual_value > self.config.capital * cap:
-                self.log.info(f"  {sig.symbol}: exposure limit, SKIP")
-                continue
-
             total_exposure += actual_value
 
             # Set entry/SL/TP
             sig.entry_price = entry_price
             sig.shares = shares
 
-            # Dynamic SL: capped by price limit (always reachable)
+            # Dynamic SL: min(4 pct, price_limit - 1 tick). Always reachable, never locked.
             sl_price, sl_pct = calc_effective_sl(
                 entry_price, sig.prev_close, sig.direction,
                 self.config.stop_loss_pct)
@@ -912,6 +1112,7 @@ class GapFadeAutoTrader:
             # Place order
             self._place_entry_order(sig)
 
+        self.exec_stats["t_submit_last"] = time.time()
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
         self.log.info(
@@ -924,14 +1125,23 @@ class GapFadeAutoTrader:
         try:
             # Yahoo Finance: ^TWII = TWSE Capitalization Weighted Index
             url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII"
-            params = {"range": "1mo", "interval": "1d"}
+            params = {"range": "2y", "interval": "1d"}
             headers = {"User-Agent": "Mozilla/5.0"}
             resp = requests.get(url, params=params, headers=headers, timeout=10)
             data = resp.json()
             result = data["chart"]["result"][0]
             raw_closes = result["indicators"]["quote"][0]["close"]
-            # Filter out None values
-            self._market_history = [c for c in raw_closes if c is not None]
+            stamps = result.get("timestamp", [])
+            # v13 market features are strictly T-1: drop any bar stamped today
+            today = pd.Timestamp(datetime.now().date())
+            hist = []
+            for i, c in enumerate(raw_closes):
+                if c is None:
+                    continue
+                if i < len(stamps) and pd.Timestamp(pd.to_datetime(stamps[i], unit="s")).normalize() >= today:
+                    continue
+                hist.append(c)
+            self._market_history = hist
             if len(self._market_history) < 6:
                 self.log.warning("  Market history: insufficient data (%d days)" % len(self._market_history))
                 self._market_features = {"drawdown": 0, "vol_5d": 0, "consec_down": 0, "ret_3d": 0, "prev_ret": 0}
@@ -962,11 +1172,10 @@ class GapFadeAutoTrader:
         # 5-day volatility (std of daily returns)
         vol_5d = float(np.std(returns[-5:])) if len(returns) >= 5 else 0
 
-        # Drawdown from 20-day high
-        recent = hist[-20:] if len(hist) >= 20 else hist
-        high_20 = max(recent)
+        # Drawdown from cumulative high (v13 def: close/cummax - 1, as of T-1)
+        high_all = max(hist)
         current = hist[-1]
-        drawdown = (current - high_20) / high_20
+        drawdown = (current - high_all) / high_all
 
         # Consecutive down days
         consec_down = 0
@@ -1110,11 +1319,67 @@ class GapFadeAutoTrader:
         else: return 0.02
 
     def _get_tp_pct(self, sig) -> float:
-        """Score-based dynamic TP: weak signals TP=7%, strong signals TP=12%."""
-        score = getattr(sig, '_score', 0)
-        if score < self.config.tp_score_threshold:
-            return self.config.take_profit_low_pct
-        return self.config.take_profit_pct
+        """v13 TP: 20 pct when q1 >= 0.85 (top decile of pass-1 prediction), else 12 pct."""
+        return float(getattr(sig, "_tp_pct", self.config.take_profit_pct))
+
+    # ----------------------------------------------------------
+    # EXECUTION TELEMETRY (pre-live risk measurement)
+    # ----------------------------------------------------------
+    fill_events: dict = {}
+    exec_stats: dict = {}
+
+    def _note_fill(self, raw: str):
+        """Record fill arrival time per stock -> measures fill rate within N seconds of open."""
+        import re as _re
+        code = _re.search(r"\b(\d{4,5})\b", raw)
+        if not code:
+            return
+        self.fill_events.setdefault(code.group(1), []).append(time.time())
+
+    def _note_ack(self, raw: str):
+        self.exec_stats.setdefault("acks", []).append((time.time(), raw[:200]))
+
+    def _exec_report(self):
+        """Summarise submit->ack latency, fill latency and reject counts."""
+        st = self.exec_stats
+        lat = [r["ack_latency"] for r in st.get("orders", []) if r.get("ack_latency") is not None]
+        rej = [r for r in st.get("orders", []) if r.get("ack_code") not in (0, None)]
+        retr = [r for r in st.get("orders", []) if r.get("retries", 0) > 0]
+        t_open = st.get("t_open")
+        fills = []
+        for sym, ts in self.fill_events.items():
+            if t_open:
+                fills.append(min(ts) - t_open)
+        self.log.info("=" * 60)
+        self.log.info("EXECUTION RISK REPORT")
+        if lat:
+            lat_s = sorted(lat)
+            self.log.info(f"  submit->ack  n={len(lat)} median={lat_s[len(lat_s)//2]*1000:.0f}ms "
+                          f"p95={lat_s[int(len(lat_s)*0.95)]*1000:.0f}ms max={max(lat)*1000:.0f}ms")
+        if st.get("t_submit_first") and st.get("t_submit_last"):
+            n = len(st.get("orders", []))
+            span = st["t_submit_last"] - st["t_submit_first"]
+            self.log.info(f"  order submission: {n} orders in {span:.1f}s "
+                          f"({n/span if span>0 else 0:.2f} orders/s) -> scan-to-all-submitted "
+                          f"{(st['t_submit_last']-st.get('t_scan',st['t_submit_first'])):.1f}s")
+        if fills:
+            fs = sorted(fills)
+            for w in (5, 10, 30, 60):
+                self.log.info(f"  filled within {w:>2}s of 09:00: {sum(1 for x in fs if x<=w)}/{len(fs)}")
+            self.log.info(f"  first-fill latency median={fs[len(fs)//2]:.1f}s")
+        self.log.info(f"  rejected orders: {len(rej)}  retried: {len(retr)}")
+        for r in rej[:10]:
+            self.log.info(f"    {r['symbol']} code={r['ack_code']} {r.get('msg','')}")
+        try:
+            import json as _j
+            p = Path(self.config.log_dir) / f"exec_report_{datetime.now().strftime('%Y%m%d')}.json"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_j.dumps({"stats": {k: v for k, v in st.items() if k != "acks"},
+                                   "fills": {k: [x - (t_open or x) for x in v] for k, v in self.fill_events.items()}},
+                                  default=str, indent=1), encoding="utf-8")
+            self.log.info(f"  saved {p}")
+        except Exception as e:
+            self.log.warning(f"  exec report save failed: {e}")
 
     def _place_entry_order(self, sig: Signal):
         """Place Smart Trade order (entry + SL + TP + ForceClose in one shot)"""
@@ -1149,9 +1414,17 @@ class GapFadeAutoTrader:
         oOrder.nClearAllPriceType = 2  # limit price
         oOrder.bstrClearAllOrderPrice = str(sig.entry_price)
 
+        rec = {"symbol": sig.symbol, "direction": sig.direction.value, "shares": sig.shares,
+               "price": sig.entry_price, "pos_pct": round(getattr(sig, "_pos_pct", 0.0), 4),
+               "retries": 0, "ack_latency": None, "ack_code": None, "msg": ""}
+        self.exec_stats.setdefault("orders", []).append(rec)
+        self.exec_stats["t_submit_first"] = min(self.exec_stats.get("t_submit_first", time.time()), time.time())
         try:
+            t_sent = time.time()
+            sig.submit_ts = t_sent
             bstrMessage, nCode = self.m_pSKOrder.SendStockStrategyDayTrade(
                 self.user_id, False, oOrder)
+            sig.ack_ts = time.time(); rec["ack_latency"] = sig.ack_ts - t_sent
         except Exception as e:
             err_str = str(e)
             if '924' in err_str or '不支持' in err_str or 'not support' in err_str.lower():
@@ -1161,6 +1434,7 @@ class GapFadeAutoTrader:
             sig.state = PositionState.CANCELLED
             return
 
+        rec["ack_code"] = nCode
         if nCode == 0:
             sig.order_seq = bstrMessage
             sig.state = PositionState.FILLED
@@ -1172,6 +1446,7 @@ class GapFadeAutoTrader:
                 f"ForceClose=13:25")
         else:
             msg = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)
+            rec["msg"] = str(msg)
             self.log.error(f"  {sig.symbol}: order failed - {msg} ({bstrMessage})")
             sig.state = PositionState.CANCELLED
 
@@ -1335,6 +1610,21 @@ class GapFadeAutoTrader:
     # ----------------------------------------------------------
 
     def daily_report(self):
+        try:
+            done = []
+            for t in self.closed_trades:
+                e, x = float(t["entry"]), float(t["exit"])
+                if e <= 0 or x <= 0:
+                    continue
+                r = (e - x) / e if t["direction"] == "SHORT" else (x - e) / e
+                done.append((t["direction"], r))
+            self._update_trail30(done)
+        except Exception as e:
+            self.log.warning(f"  trail30 update failed: {e}")
+        try:
+            self._exec_report()
+        except Exception as e:
+            self.log.warning(f"  exec report failed: {e}")
         """Daily settlement report"""
         self.log.info("=" * 60)
         self.log.info("DAILY REPORT")
@@ -1500,75 +1790,6 @@ class GapFadeSimulator(GapFadeAutoTrader):
 
     def disconnect(self):
         pass
-
-    def _fetch_market_history(self):
-        """Fetch TSEC weighted index history via Yahoo Finance. Call before scan."""
-        import requests
-        try:
-            # Yahoo Finance: ^TWII = TWSE Capitalization Weighted Index
-            url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII"
-            params = {"range": "1mo", "interval": "1d"}
-            headers = {"User-Agent": "Mozilla/5.0"}
-            resp = requests.get(url, params=params, headers=headers, timeout=10)
-            data = resp.json()
-            result = data["chart"]["result"][0]
-            raw_closes = result["indicators"]["quote"][0]["close"]
-            # Filter out None values
-            self._market_history = [c for c in raw_closes if c is not None]
-            if len(self._market_history) < 6:
-                self.log.warning("  Market history: insufficient data (%d days)" % len(self._market_history))
-                self._market_features = {"drawdown": 0, "vol_5d": 0, "consec_down": 0, "ret_3d": 0, "prev_ret": 0}
-                return
-            self.log.info(f"  Market history loaded: {len(self._market_history)} days (Yahoo ^TWII)")
-            self._calc_market_features()
-        except Exception as e:
-            self.log.warning(f"  Market history fetch failed: {e}. Using neutral sizing.")
-            self._market_history = []
-            self._market_features = {"drawdown": 0, "vol_5d": 0, "consec_down": 0, "ret_3d": 0, "prev_ret": 0}
-
-    def _calc_market_features(self):
-        """Calculate market regime features from index history."""
-        hist = self._market_history
-        if len(hist) < 6:
-            self._market_features = {"drawdown": 0, "vol_5d": 0, "consec_down": 0, "ret_3d": 0, "prev_ret": 0}
-            return
-
-        # Daily returns
-        returns = [(hist[i] - hist[i-1]) / hist[i-1] for i in range(1, len(hist))]
-
-        # Previous day return (last element = most recent completed day)
-        prev_ret = returns[-1] if returns else 0
-
-        # 3-day cumulative
-        ret_3d = sum(returns[-3:]) if len(returns) >= 3 else 0
-
-        # 5-day volatility (std of daily returns)
-        vol_5d = float(np.std(returns[-5:])) if len(returns) >= 5 else 0
-
-        # Drawdown from 20-day high
-        recent = hist[-20:] if len(hist) >= 20 else hist
-        high_20 = max(recent)
-        current = hist[-1]
-        drawdown = (current - high_20) / high_20
-
-        # Consecutive down days
-        consec_down = 0
-        for r in reversed(returns):
-            if r < 0:
-                consec_down += 1
-            else:
-                break
-
-        self._market_features = {
-            "drawdown": drawdown,
-            "vol_5d": vol_5d,
-            "consec_down": consec_down,
-            "ret_3d": ret_3d,
-            "prev_ret": prev_ret,
-        }
-        self.log.info(
-            f"  Market regime: DD={drawdown*100:.1f}% Vol={vol_5d*100:.2f}% "
-            f"ConsecDown={consec_down} 3dRet={ret_3d*100:.1f}% PrevRet={prev_ret*100:.2f}%")
 
     def _compute_stock_features(self, signals):
         """Compute per-stock features for Model C scoring."""
