@@ -311,6 +311,43 @@ scan#2 ... 0.46s      scan#3 ... 0.50s
 | TPEx 官網 `openapi/v1/...` | 全部路徑都回同一份 SPA HTML，**不是 API**；`emis.tpex.org.tw` DNS 不存在 |
 | 群益 SKCOM | 見下 |
 
+### ⚠️ 更正：TWSE MIS 其實**看得到上櫃**（`otc_` 前綴）
+`twjackysu/TWSEMCPServer` 的即時工具讓我看見漏掉的一件事：MIS 的 `getStockInfo.jsp`
+用 **`otc_<code>.tw`** 就回上櫃報價，`tse_` 只回上市。舊退路只送 `tse_`，
+所以上櫃全軍覆沒 —— 那不是 MIS 的限制，是我們前綴用錯。
+
+實測（2026-10-26，免金鑰）：
+
+| 前綴 | 結果 |
+|---|---|
+| `otc_1240.tw` | **茂生農經 o=54.00 y=54.00 z=53.70 u=59.40 w=48.60**，與富果完全一致 |
+| 單次上限 | **100 檔**（200 檔回空） |
+| 全部 1,775 檔上櫃 | 只回 **1,403 檔（79%）**，缺 **372 檔** |
+| 缺的 372 檔 | 全部 `type=EQUITY` 且富果有真實行情：1260 富味鄉、1269 乾杯、1293 利統、1343、1480、1594、2071… **MIS 真的不載**，不是批次截斷（單檔測也回空） |
+| 兩市合計 | 34 次請求 / **7.7 秒**（15 並發） |
+
+已把 `otc_` 重試加進退路 `_twse_batch_scan()`（先 `tse_`，缺的再用 `otc_` 補）。
+實測退路現在：**TPEx 850/851、has_open=1896、3.66 秒**（之前是 0 檔上櫃）。
+
+⚠️ 那 372 檔缺的基本都在策略宇宙之外（被 10M 成交額與 30 元價格過濾掉），
+所以**退路對我們的 1,928 檔宇宙涵蓋 850/851**，實務可用；
+但 MIS 仍不是「完整」來源，富果維持為主線（0.5 秒、100%）。
+
+### 關於 `twjackysu/TWSEMCPServer`（2026-10-26 評估）
+MIT、180 星、維護中。它是 **MCP Server**，定位是給 LLM 對話用：
+回傳**格式化文字表格**、有 `TWSE_MAX_RESPONSE_BYTES` 上限與 `DISPLAY_LIMIT` 預設 20 筆、
+內建 circuit breaker 與 60 秒快取。即時只有 MIS 那一條（見上），
+**其餘全部是盤後/日終**（TWSE OpenAPI、TPEx afterTrading、TAIFEX、MOPS）。
+→ 不適合 09:00 全市場掃描；但它的**端點清單**很有價值，值得直接抄自己抓。
+
+已實測這些官方端點**免 token、可直連、回 JSON**：
+
+| 端點 | 內容 | 對策略的用途 |
+|---|---|---|
+| `openapi.twse.com.tw/v1/exchangeReport/TWTBAU1` | **暫停先賣後買當日沖銷預告**（Code/Name/StartDate/EndDate/Reason） | 當沖過濾，比現在只排 2330/2317 精準 |
+| `openapi.twse.com.tw/v1/exchangeReport/MI_INDEX` | 盤後每日行情 | 面板備源 |
+| `www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O` | **上櫃公司全清單**（938KB，Date=1151026） | 上櫃宇宙/公司資料 |
+
 ### 群益 SKCOM 報價：本輪實測結論（記錄下來免得重試）
 - `SKDLLPython`：`ManageServerConnection(id, 0, 1)`（target **1 = 國內行情**）
   **2.2 秒**就把報價伺服器連起來，`GetStockByStockNo(0,"2330")` 回真實資料

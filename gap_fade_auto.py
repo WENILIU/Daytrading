@@ -1134,8 +1134,8 @@ class GapFadeAutoTrader:
         adapter = requests.adapters.HTTPAdapter(pool_connections=25, pool_maxsize=25)
         session.mount("http://", adapter)
 
-        def query_batch(codes):
-            parts = [f"tse_{c}.tw" for c in codes]
+        def query_batch(codes, prefix="tse"):
+            parts = [f"{prefix}_{c}.tw" for c in codes]
             ex_ch = "|".join(parts)
             url = f"{TWSE_API}?ex_ch={ex_ch}&_={int(time.time()*1000)}"
             try:
@@ -1156,6 +1156,22 @@ class GapFadeAutoTrader:
             futures = [executor.submit(query_batch, b) for b in batches]
             for f in as_completed(futures):
                 all_raw.extend(f.result())
+
+        # MIS answers 上櫃 only under the otc_ prefix (learned from
+        # twjackysu/TWSEMCPServer). Without this the fallback silently returns
+        # nothing for every TPEx code. Measured 2026-10-26: otc_ recovers
+        # 1,403 of 1,775 TPEx codes; the other 372 are real tradeable stocks
+        # MIS does not carry at all (1260 富味鄉, 1269 乾杯, 1293 利統, ...), which
+        # is why Fugle stays the primary source.
+        found = {str(it.get("c")) for it in all_raw if it.get("c")}
+        missing = [c for c in stock_list if c not in found]
+        if missing:
+            otc_batches = [missing[i:i+BATCH_SIZE]
+                           for i in range(0, len(missing), BATCH_SIZE)]
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = [executor.submit(query_batch, b, "otc") for b in otc_batches]
+                for f in as_completed(futures):
+                    all_raw.extend(f.result())
 
         return all_raw
 
