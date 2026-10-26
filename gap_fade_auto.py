@@ -160,6 +160,11 @@ class Config:
 
     # --- Fugle (real-time scanning) ---
     fugle_api_key = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
+    # Batch endpoint: intraday/quotes?symbol=a,b,c. Measured 2026-10-26: 1,000
+    # symbols/request, 3,307 codes (1,532 TWSE + 1,775 TPEx) in 4 requests /
+    # 1.5s, 100 pct coverage of BOTH markets. TWSE MIS only answers for 上市.
+    fugle_batch_url = "https://api.fugle.tw/marketdata/v1.0/stock/intraday/quotes"
+    fugle_batch_size = 1000
 
     # --- Yahoo Finance (post-market reporting only) ---
     yahoo_batch_size = 50
@@ -694,26 +699,28 @@ class GapFadeAutoTrader:
         t0 = time.time()
         self.exec_stats["t_scan"] = t0
         self.exec_stats.setdefault("t_open", t0)
-        raw_data = self._twse_batch_scan(stock_list)
+        raw_data, scan_source = self._batch_scan(stock_list)
         scan_time = time.time() - t0
-        self.log.info(f"  TWSE scan: {len(raw_data)} quotes in {scan_time:.1f}s")
+        self.log.info(f"  Scan via {scan_source}: {len(raw_data)} quotes in {scan_time:.1f}s")
 
-        # Coverage check. TWSE MIS only answers for 上市; every 上櫃 / ETF code in
-        # the universe comes back empty, and the strategy loses roughly half its
-        # signals that way (measured: 44.6 pct 上櫃 + 3.3 pct ETF, and the
-        # 上市-only subset runs about 2.6x lower CAGR). Never let that happen
-        # silently.
+        # Coverage check. The model was trained on both markets, so a feed that
+        # silently drops 上櫃 would be a train/serve mismatch worth ~2.6x CAGR
+        # (measured: 44.6 pct of signals are 上櫃). Fail loudly instead.
         seen = {str(it.get("c")) for it in raw_data if it.get("n")}
         missing = [c for c in stock_list if c not in seen]
+        tpex_seen = sum(1 for it in raw_data if it.get("x") == "TPEx")
         self.exec_stats["universe"] = len(stock_list)
         self.exec_stats["quoted"] = len(seen)
         self.exec_stats["unquoted"] = len(missing)
+        self.exec_stats["tpex_quoted"] = tpex_seen
         if missing:
             self.log.warning(
                 f"  COVERAGE: {len(missing)}/{len(stock_list)} codes returned no quote "
-                f"({len(missing)/len(stock_list)*100:.0f}%). These are 上櫃/ETF - "
-                f"the TWSE feed does not carry them. "
+                f"({len(missing)/len(stock_list)*100:.0f}%). "
                 f"Sample: {','.join(missing[:8])}")
+        else:
+            self.log.info(f"  COVERAGE: full universe answered "
+                          f"(TPEx rows in feed: {tpex_seen})")
         self.exec_stats["scan_seconds"] = scan_time
 
         # Process: filter + gap detection
@@ -1063,6 +1070,58 @@ class GapFadeAutoTrader:
             path = path.parent / "all_stocks.txt"
         with open(path, "r", encoding="utf-8") as f:
             return [line.strip() for line in f if line.strip()]
+
+    def _fugle_batch_scan(self, stock_list: list[str]) -> list[dict]:
+        """Batch-query Fugle `intraday/quotes?symbol=...` for the WHOLE market.
+
+        Returns rows shaped like TWSE MIS `msgArray` entries (c/n/o/y/v) so the
+        rest of scan_signals is source-agnostic. Unlike TWSE MIS this carries
+        上櫃 (TPEx) as well as 上市, which is where ~43 pct of the model's
+        signals come from.
+        """
+        session = requests.Session()
+        session.headers.update({"X-API-KEY": self.config.fugle_api_key})
+
+        def query_batch(codes):
+            try:
+                r = session.get(self.config.fugle_batch_url,
+                                params={"symbol": ",".join(codes)}, timeout=20)
+                if r.status_code != 200:
+                    self.log.warning(f"  Fugle batch {r.status_code}: {r.text[:120]}")
+                    return []
+                return r.json()
+            except Exception as exc:
+                self.log.warning(f"  Fugle batch error: {exc}")
+                return []
+
+        size = self.config.fugle_batch_size
+        batches = [stock_list[i:i+size] for i in range(0, len(stock_list), size)]
+        rows = []
+        for b in batches:                      # 4 requests for 3.3k codes; no
+            for q in query_batch(b):          # parallelism -> no 429s
+                vol = (q.get("total") or {}).get("tradeVolume") or 0
+                rows.append({
+                    "c": str(q.get("symbol", "")),
+                    "n": q.get("name", "") or "",
+                    "o": q.get("openPrice"),
+                    "y": q.get("previousClose"),
+                    "v": vol,
+                    "x": q.get("exchange", ""),
+                })
+        return rows
+
+    def _batch_scan(self, stock_list: list[str]) -> tuple[list[dict], str]:
+        """Primary = Fugle (both markets). Fallback = TWSE MIS (上市 only)."""
+        try:
+            rows = self._fugle_batch_scan(stock_list)
+            got = {r["c"] for r in rows if r.get("n")}
+            if len(got) >= max(1, int(len(stock_list) * 0.6)):
+                return rows, "Fugle (TWSE+TPEx)"
+            self.log.warning(f"  Fugle answered only {len(got)}/{len(stock_list)} "
+                             f"codes, falling back to TWSE MIS")
+        except Exception as exc:
+            self.log.warning(f"  Fugle scan failed ({exc}), falling back to TWSE MIS")
+        return self._twse_batch_scan(stock_list), "TWSE MIS (上市 only)"
 
     def _twse_batch_scan(self, stock_list: list[str]) -> list[dict]:
         """Batch-query TWSE API. 100 codes/request, 15 parallel workers."""
@@ -1907,7 +1966,7 @@ class GapFadeAutoTrader:
         need = max(1, int(len(probe) * 0.9))
         got = 0
         while time.time() < deadline:
-            rows = self._twse_batch_scan(probe)
+            rows, _ = self._batch_scan(probe)
             got = sum(1 for r in rows
                       if _to_float(r.get("o")) > 0 and _to_float(r.get("y")) > 0)
             if got >= need:
@@ -2248,13 +2307,34 @@ if __name__ == "__main__":
         print("SIMULATION MODE - Paper trading via Fugle (waits for 9:00/9:15)")
         print(f"  Capital: {config.capital:,.0f}")
         trader = GapFadeSimulator(config)
+    elif mode == "scan":
+        print("SCAN SPEED TEST - full-market quote scan only, NO orders")
+        trader = GapFadeSimulator(config)
+        trader.connect()
+        codes = trader._load_stock_list()
+        print(f"  Universe: {len(codes)} codes")
+        for trial in range(3):
+            t0 = time.time()
+            rows, source = trader._batch_scan(codes)
+            dt = time.time() - t0
+            named = [r for r in rows if r.get("n")]
+            with_open = sum(1 for r in named if _to_float(r.get("o")) > 0)
+            with_ref = sum(1 for r in named if _to_float(r.get("y")) > 0)
+            by_ex = {}
+            for r in named:
+                by_ex[r.get("x") or "?"] = by_ex.get(r.get("x") or "?", 0) + 1
+            print("  scan#%d via %s: rows=%d has_open=%d has_prevclose=%d "
+                  "by_exchange=%s  %.2fs" % (trial + 1, source, len(named), with_open,
+                                             with_ref, by_ex, dt))
+            time.sleep(1)
+        sys.exit(0)
     elif mode == "now":
         print("NOW MODE - Immediate execution (no time wait, 30min monitor)")
         print(f"  Capital: {config.capital:,.0f}")
         trader = GapFadeNowTrader(config)
     else:
         print(f"Unknown mode: {mode}")
-        print("Usage: python gap_fade_auto.py [live|sim|now]")
+        print("Usage: python gap_fade_auto.py [live|sim|now|scan]")
         sys.exit(1)
 
     trader.run()

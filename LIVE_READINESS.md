@@ -40,14 +40,15 @@ v13 的停損是 `min(4%, 漲停價 − 1 tick)`。智慧單的**百分比**停�
 
 回測假設 09:00:00 的開盤價可直接成交。實際上要等資料源把開盤價吐出來。
 
-- 已把 `_wait_for_quotes()` 改成探測**掃描器同一個資料源**（TWSE MIS）。
-  它之前探的是 `SKQuoteLib`，兩者填資料的速度不同，會給出誤導性的答案。
+- 已把 `_wait_for_quotes()` 改成探測**掃描器同一個資料源**（現在是富果批量端點，
+  見 §7A）。它之前探的是 `SKQuoteLib`，兩者填資料的速度不同，會給出誤導性的答案。
 - 現在 `run()` 會把量測基準釘在真正的 09:00:00，並在收盤的
   `EXECUTION RISK REPORT` 輸出：
   - `RISK1 opening price visible: X.XXs after 09:00:00`
   - `RISK1 scan finished: X.XXs after 09:00:00`
 - 也可以單獨跑：`python v13_live_risk.py quotes`（建議 08:58 啟動）。
-- 已知參考值：掃描 1,928 檔本身只要 **2.9 秒**，瓶頸只在「開盤價何時可見」。
+- 已知參考值：掃描 1,928 檔（含 851 檔上櫃）只要 **0.5 秒**（§7A 實測），
+  瓶頸只在「開盤價何時可見」。
 - 使用者先前觀察到的 4960 案例：09:00:18 開 30.3 後一路滑到 28.25。
   若 09:00:20 才看到價格、再花 5 秒下單，SHORT 的進場價會比回測差很多
   （但方向對 SHORT 有利，對 LONG 不利）。
@@ -87,7 +88,7 @@ cancel via CancelTSStrategyOrderV1: 6/6
 
 ---
 
-## 4. 新發現：實盤掃描只看得到一半的訊號（**最大的未解決問題**）
+## 4. 實盤掃描只看得到一半的訊號（**已解決，見 §7A**）
 
 `_twse_batch_scan` 用 `tse_<code>.tw`，而 TWSE MIS **只回答上市公司**。
 上櫃與 ETF 會回空陣列，於是無聲地被漏掉。
@@ -112,23 +113,19 @@ cancel via CancelTSStrategyOrderV1: 6/6
 逐年（僅上市 vs 全部）都是同一個形状：2021 180% vs 374%、2024 114% vs 254%、
 2026 143% vs 277%。不是某一年特別依賴上櫃，是每一年都少一半。
 
-### 為什麼其他來源不行（本輪已試）
-- `SKQuoteLib_GetStockByIndexLONG`（群益自家報價，理應涵蓋兩個市場、而且最快）：
-  連三次都回 **0 檔**。需要 `RequestStockList` + message pump 才會有推送，
-  先前多次嘗試都卡在這裡。這是**正確解法**，但還要再處理。
-- Fugle `stock.snapshot.quotes(market="tpex")`：免費方案 **403 Forbidden**。
-- TPEx 官方即時端點：本輪試的 4 個 URL 都是 404，路徑需要再查。
-- Yahoo：延遲報價，09:00 不能用。
-
-### 目前的做法
-`scan_signals()` 會在 09:00 直接把涵蓋率印出來，不會再無聲漏掉：
+### 已解決
+掃描來源已從 TWSE MIS 換成**富果批次端點** `intraday/quotes?symbol=...`，
+一次請求 1,000 檔、全市場 4 次請求、**兩市 100% 涵蓋**、免費金鑰。
+實測 `python gap_fade_auto.py scan`：
 
 ```
-COVERAGE: 851/1928 codes returned no quote (44%). These are 上櫃/ETF -
-the TWSE feed does not carry them. Sample: 1240,1259,1264,...
+scan#1 via Fugle (TWSE+TPEx): rows=1928 has_open=1897 has_prevclose=1928
+        by_exchange={'TWSE': 1077, 'TPEx': 851}  0.52s
 ```
 
-收盤的 `EXECUTION RISK REPORT` 也會固定輸出 `MARKET COVERAGE` 那一行。
+TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A。
+⚠️ 「僅上市 CAGR 70.0%」那一列現在只是**歷史對照**，不再是實盤預期；
+203% 的阻礙已排除，但**仍需在開盤日實測 RISK1** 才算真的ready。
 
 ---
 
@@ -153,19 +150,23 @@ the TWSE feed does not carry them. Sample: 1240,1259,1264,...
   `SK_WARNING_SIGN_TS_SMARTTRADE_RISK_NOITICE_FIRST`（需先簽署證券智慧單風險預告書）。
   送單與刪單都正常，只有查詢回報拿不到 → 盤中自驗證請直接用群益 App。
 - `GetBalanceQuery` 在此元件回 `SK_THIS_FUNCTION_NOT_SUPPORTED`。
-- **因子面板已過期（停在 2026-08-19）**。成本不是「11%」那麼小，見第 7 節。
+- 因子面板**已更新到 2026-10-22**（見第 7 節）。每日開盤前需 `--refresh`；
+  面板落後超過 10 天時程式自動改餵 NaN，與回測口徑一致。
 
 ---
 
 ## 6. 上實盤前的檢查清單
 
-1. 更新因子面板。**`--refresh` 讀的是本地 finlab 副本，不會自己變新**，
-   見第 7 節的三條路。目前程式在面板過期時自動改餵 NaN（與回測一致）並印警告。
-2. 先跑一次 `python gap_fade_auto.py live`，確認
+1. 每日開盤前 `python v13_factors.py --refresh`（已向 finlab VIP 抓最新日 K，
+   面板停在 2026-10-22）。面板過期時程式自動改餵 NaN（與回測一致）並印警告。
+2. **開盤日 08:58 先跑 `python gap_fade_auto.py scan`**，確認兩件事：
+   `by_exchange` 裡 TPEx 有 851 檔，以及距 09:00:00 的實際延遲（RISK1）。
+   這是上實盤前唯一還沒量到的關鍵數字。
+3. 再跑一次 `python gap_fade_auto.py live`，確認收盤報告的
    `RISK1 opening price visible` 與 `MARKET COVERAGE` 兩行。
-3. 在群益 App 確認 09:00 那批智慧單是**當日**、且停損停利條件正確。
-4. 決定上櫃涵蓋率怎麼補（SKQuoteLib / Fugle 升級 / TPEx 端點）。
-   在此之前，實盤表現應以「僅上市」那一列（CAGR ~70%）預估，不是 203%。
+4. 在群益 App 確認 09:00 那批智慧單是**當日**、且停損停利條件正確。
+5. 上櫃涵蓋率已解決（§7A），203% 不再是「只能下單一半市場」的數字；
+   但 RISK1 未量測前，仍不建議直接全倉。
 
 ---
 
@@ -237,12 +238,11 @@ Factor panel as-of 2026-10-22 (lag 4d)   ← 不再觸發 STALE，不再餵 NaN
 
 ---
 
-## 7A. 上櫃涵蓋率：這是目前最大的單一缺陷（已精確量化）
+## 7A. 上櫃涵蓋率：已解決（2026-10-26 找到免費批量來源並整合）
 
-用富果的官方代碼清單分類（`intraday.tickers(exchange=...)`：
-TWSE 1,532 檔 / TPEx 1,775 檔，兩邊無重疊）：
-
-**模型選出的 124,068 筆訊號：**
+### 問題（保留實測依據）
+用富果官方代碼清單分類（TWSE 1,532 / TPEx 1,775，無重疊），模型選出的
+124,068 筆訊號：
 
 | 市場 | 筆數 | 佔比 | 勝率 | 每筆淨 PnL |
 |---|---|---|---|---|
@@ -250,47 +250,84 @@ TWSE 1,532 檔 / TPEx 1,775 檔，兩邊無重疊）：
 | **上櫃** | **52,727** | **42.5%** | **54.4%** | **+0.39%** |
 | 其他/ETF | 2,830 | 2.3% | 54.0% | +0.28% |
 
-**上櫃占 42.5% 的訊號，而且每筆 edge 是上市的 1.8 倍。** 逐年穩定在 40–48%，
-2023 年甚至 46.8%。這不是邊角功能，是策略的一半。
+上櫃占 42.5% 的訊號、每筆 edge 是上市的 1.8 倍，逐年穩定 40–48%。
+舊掃描走 TWSE MIS `getStockInfo.jsp`，**只服務上市**，所以那行
+`COVERAGE: 851/1928 無報價` 的 851 檔正好就是宇宙裡的 851 檔上櫃 ——
+這是 train/serve 不一致，203% 在修好前不能當實盤預期。
 
-### 診斷已收斂到一點
-`valid_stocks.txt` 1,928 檔 = **1,077 TWSE + 851 TPEx**。
-掃描那行印的 `COVERAGE: 851/1928 無報價` —— **那 851 檔正好就是清單裡的 851 檔
-上櫃股票**，不是隨機漏。TWSE MIS 的 `getStockInfo.jsp` 只服務上市公司。
+### 解法：富果批次端點（SDK 沒包，但 HTTP 有）
+```
+GET https://api.fugle.tw/marketdata/v1.0/stock/intraday/quotes?symbol=A,B,C
+```
+注意是**複數** `intraday/quotes` + `symbol=` 逗號清單。`fugle_marketdata`
+SDK 只包了單檔 `intraday/quote/{symbol}`，所以之前被誤判成「只能逐檔」。
 
-另有 322 檔 / 7,639 筆（6.2%）訊號的代碼根本不在 `valid_stocks.txt` 裡。
+實測（2026-10-26，免費金鑰）：
 
-### 各來源實測結果
+| 項目 | 實測值 |
+|---|---|
+| 單次請求上限 | **1,000 檔**（1,000 檔仍 200 OK；空清單才 400） |
+| 全市場 3,307 檔 | **4 次請求 / 1.41–1.91 秒** |
+| 涵蓋率 | **TPEx 1,775/1,775、TWSE 1,532/1,532（100%）** |
+| 重覆三次 | 3,307 / 3,307 / 3,307，1.48–1.91s，**沒有 429** |
+| 欄位 | `openPrice` `previousClose` `referencePrice` `high/low/close` `lastPrice` `bids/asks` `total.tradeVolume/tradeValue/tradeVolumeAtAsk/tradeVolumeAtBid` |
 
-| 來源 | 上櫃 | 批量 | 結果 |
-|---|---|---|---|
-| TWSE MIS `getStockInfo.jsp` | ✗ | ✓ 1,532 檔 ~6s | 只回上市，这就是现在的洞 |
-| 富果 `intraday.quote(symbol=)` | **✓**（`market:OTC, exchange:TPEx`） | ✗ 單檔 0.5s | 可用但 851 檔太慢 |
-| 富果 `intraday.tickers(exchange=)` | ✓ 1,775 檔 / 0.37s | 只給**代碼清單**，不含價格 | 適合建清單 |
-| 富果 `snapshot.quotes` / `movers` | — | ✓ | **403 Forbidden**（目前方案沒有這個權限） |
-| `gre.twse.com.tw` / `emis.twse.com.tw` / `gre.tpex.org.tw` | — | — | 連線失敗（DNS/不通） |
-| **群益 SKCOM 報價訂閱** | 應可（待驗證） | ✓ 訂閱後本地讀 0.1ms | 今天 `SK_ERROR_QUOTE_CONNECT_FIRST`，連線沒起來 |
+`tradeVolumeAtAsk/Bid` 也在裡面 —— 你之前問的「賣量佔比能不能當下知道」，
+這個端點就能算，不用等收盤。
 
-**結論：上櫃的即時報價應該用群益 SKCOM 訂閱解決**，理由：
-(1) 帳號已有、免費；(2) 上市+上櫃都涵蓋，一個來源就夠；
-(3) 訂閱後讀取是本地記憶體操作（實測 0.1–0.4ms/檔），3,300 檔也是毫秒級；
-(4) 下單本來就走 SKCOM，不需要多一個外部依賴。
+### 已整合進 `gap_fade_auto.py`
+- `_fugle_batch_scan()`：回傳與 TWSE MIS `msgArray` 同形狀的列（`c/n/o/y/v`），
+  所以 `scan_signals` 的過濾/Gap 邏輯完全不用改。
+- `_batch_scan()`：優先用富果（兩市），成功率 < 60% 或異常才退回 TWSE MIS。
+- 覆蓋率檢查改成會**回報 TPEx 筆數**，缺代號時直接警告。
+- `_wait_for_quotes()` 改探同一個來源（之前探 SKQuoteLib，跟實際掃描來源不同）。
+- 新增 `python gap_fade_auto.py scan`：只測掃描速度與涵蓋率，**不下單**。
 
-富果逐檔 0.5s、851 檔即使命 20 執行緒也要 ~21 秒 —— 你自己說過
-「09:00:18 才拿到、過 5 秒下單早就來不及」，所以那條路只能當備援。
+實測（今天 10-26 無行情，資料停在 10-22）：
+```
+Universe: 1928 codes
+scan#1 via Fugle (TWSE+TPEx): rows=1928 has_open=1897 has_prevclose=1928
+        by_exchange={'TWSE': 1077, 'TPEx': 851}  0.52s
+scan#2 ... 0.46s      scan#3 ... 0.50s
+```
+**851 檔上櫃全部補齊，策略宇宙 1,928 檔 0.5 秒掃完。**
 
-⚠️ **SKCOM 報價連線是目前同時卡住兩件事的單一關卡**：
-上櫃涵蓋率、以及 RISK1（開盤幾秒能看到開盤價）的實測，都要先把它跑通。
-今天休市（三家來源都停在 2026-10-22），無法重試，**需要一個開盤日 08:55 實測**。
+### 順帶解决的過濾器（同一個金鑰）
+`GET .../intraday/ticker/{symbol}` 對**兩市**都回：
+`isDisposition`（處置）、`canDayTrade` / `canBuyDayTrade`（當沖可否）、
+`canBelowFlatMarginShortSell` / `canBelowFlatSBLShortSell`（空單）、
+`limitUpPrice` / `limitDownPrice`、`boardLot`（一張股數）、`securityStatus`。
+這是逐檔端點（0.22s/檔），不適合 09:00 掃，但適合**盤前 08:00 一次性**
+把 3,300 檔的過濾表建好（5 並發約 2.5 分鐘）。上櫃的處置/當沖過濾因此
+也有官方來源可用，不再只能靠 TWSE 公告。
 
-### 在修好之前，回測口徑必須一起改
-模型是在**含上櫃的 2,242 檔宇宙**上訓練與選股的，實盤只掃得到上市 →
-這是 **train/serve 不一致**，不只是「少幾筆交易」：分位池 `pool1/pool2`、
-`pred_q` 門檻、`base_pos` 階梯全部是在那個分佈上標定的。
-所以 203% 在修好上櫃之前**不能**當成實盤預期；誠實的暫時代價是
-「僅上市」那一列（同引擎實測 CAGR 70.0% / MDD −4.31%）。
+### 免費方案的實際上限（全部實測，避免再走回頭路）
+| 來源 | 結果 |
+|---|---|
+| 富果 WebSocket `stock/streaming` | auth 成功、`channel:"quotes"` 可訂閱上櫃，但**免費方案上限 5 檔**（第 6 檔 `Subscription limit exceeded`）→ 無法全市場 |
+| 富果 `snapshot/quotes|movers|actives/{market}` | **403**（方案無權限，含所有 market 變體）→ 這是唯一能一次拿全市場的批量端點，值得打給富果問升級 |
+| 富果逐檔 REST | 0.21–0.35s/檔；10 並發只剩 58/120 成功，**20/40 並發全 429** |
+| Yahoo `v7/finance/quote` | 部分上櫃被**靜態省略**（1240.TW 不見），且非即時 |
+| TPEx 官網 `openapi/v1/...` | 全部路徑都回同一份 SPA HTML，**不是 API**；`emis.tpex.org.tw` DNS 不存在 |
+| 群益 SKCOM | 見下 |
 
----
+### 群益 SKCOM 報價：本輪實測結論（記錄下來免得重試）
+- `SKDLLPython`：`ManageServerConnection(id, 0, 1)`（target **1 = 國內行情**）
+  **2.2 秒**就把報價伺服器連起來，`GetStockByStockNo(0,"2330")` 回真實資料
+  （前收 2420、漲停 2660、跌停 2180、`nYQty`、`nDayTrade`、`nTradingDay=20261022`）。
+- 但**上櫃訂閱不起來**：`SKQuoteLib_RequestStocks("1240")` →
+  `SK_SUBJECT_COMMODITY_IS_NOT_EXIST`；`LoadCommodity(1)` 回 SK_SUCCESS 也沒用。
+  這個 wrapper **沒有帶市場碼的訂閱**（DLL 只匯出 `RequestStocks`/
+  `GetStockByStockNo`/`RequestStockList`，沒有 `RequestStocksWithMarketNo`、
+  也沒有 `GetStockByIndexLONG`）。
+- COM（comtypes）那條路：`SKQuoteLib_EnterMonitorLONG()` 回 SK_SUCCESS，
+  但 `OnConnection` 在 40 秒內從未派發（comtypes 事件需要訊息泵），
+  之後 `RequestStockList` 仍 `SK_ERROR_QUOTE_CONNECT_FIRST`。
+- 訂閱另有**單頁上限**：200 檔一批 → `SK_SUBJECT_QUOTE_LIMIT_EXCEED_IN_ONE_PAGE`。
+
+→ **上櫃掃描不走 SKCOM**，改走富果批量。SKCOM 仍只負責下單（本來就用得好好的）。
+⚠️ 今天休市，以上都是「涵蓋率與速度」的實測；**09:00:00 實際延遲（RISK1）
+仍需在開盤日用 `gap_fade_auto.py scan` 實測一次**。
 
 ## 8. 本輪另外修掉的兩個執行面問題
 
@@ -318,6 +355,7 @@ TWSE 1,532 檔 / TPEx 1,775 檔，兩邊無重疊）：
 | 富果 `intraday.quote` | `"date": "2026-10-22"` | 2435 / 2435 / 2385 / 2385 |
 
 所以 `python gap_fade_auto.py now` 今天掃到的是 **2026-10-22 的 K 線**，
-不是今天的。那 6 檔 SHORT 候選（2383/3037/6213/4958/2327/2492）是 10-22 的訊號。
-程式行為沒有錯（喂什麼算什麼），但**別把它當成今天的訊號**；
-`scan` 那行印的 `Market gap` 與訊號日期要一起看。
+不是今天的。程式行為沒有錯（喂什麼算什麼），但**別把它當成今天的訊號**；
+`now` 印的 `Market gap` 與訊號日期要一起看。
+`scan` 模式只測速度與涵蓋率、不產訊號，因此不受這個影響（它印的 `has_open`
+是 10-22 的開盤價，正好用來驗證「兩個市場都抓得到」）。

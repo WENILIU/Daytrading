@@ -21,9 +21,9 @@ v13 的兩個關鍵修正：
 | 檔案 | 用途 |
 |---|---|
 | `STRATEGY.md` | 完整策略說明、參數、績效、衰退審計、實盤要求 |
-| `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|sim\|now]` |
+| `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|sim\|now\|scan]`，`scan` 只測全市場掃描速度與涵蓋率 |
 | `v13_live_risk.py` | 上實盤前三項風險量測（報價延遲／可借券／下單延遲） |
-| `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、尚未解決的涵蓋率問題 |
+| `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、上櫃涵蓋率的解法與各資料源實測 |
 | `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh`（向 finlab VIP 抓最新日 K → append → 重建因子）。<br>首次先 `--seed` 一次。見 `LIVE_READINESS.md` 第 7 節 |
 | `v13_build.py` `v13_train.py` `v13_bt.py` | 回測宇宙、walk-forward 訓練、回測引擎 |
 | `v13_export_model.py` | 輸出可上線模型 `v13_model.pkl`（模型與分位池，未入 repo，需自行產生） |
@@ -31,18 +31,24 @@ v13 的兩個關鍵修正：
 | `RESEARCH_v11_expansion.md` | 研究記錄：所有試過並被否決的方向與原因 |
 | `v13_final_report.txt` `v8_final_report.txt` | 逐年／逐月完整績效 |
 
-## ⚠️ 實盤目前只能做到一半
+## ✅ 上櫃涵蓋率已補齊（2026-10-26）
 
-`gap_fade_auto.py` 的掃描走 TWSE 公開 API，而**它只回答上市公司**：上櫃與 ETF 回空陣列，
-無聲地被漏掉。實測這佔掉 **45.9%** 的訊號。用同一支回測引擎比較：
+掃描原本走 TWSE 公開 API，**它只回答上市公司**，上櫃回空陣列被無聲漏掉 ——
+那佔掉 45.9% 的訊號，用同一支回測引擎實測差 2.6 倍 CAGR（僅上市 70.0% vs 全部 184.9%）。
 
-| 可交易範圍 | CAGR | MDD | Sharpe |
-|---|---|---|---|
-| 全部訊號 | 184.9% | −3.26% | 5.81 |
-| 僅上市（實盤現況） | 70.0% | −4.31% | 4.21 |
+已改成富果批次端點 `GET /marketdata/v1.0/stock/intraday/quotes?symbol=A,B,C`
+（複數路徑，SDK 沒包但 HTTP 有），**免費金鑰**即可：
 
-所以 203% 是「兩個市場都能下單」的數字。補上上櫃報價來源之前，
-實盤請以 **CAGR ~70%** 預估。原因與三個可能的解法見 `LIVE_READINESS.md`。
+| 項目 | 實測 |
+|---|---|
+| 單次請求 | 1,000 檔 |
+| 全市場 3,307 檔 | 4 次請求 / 1.5 秒 |
+| 涵蓋率 | TPEx 1,775/1,775、TWSE 1,532/1,532（**100%**） |
+| 策略宇宙 1,928 檔 | **0.5 秒**（含 851 檔上櫃） |
+
+TWSE MIS 保留為退路。驗證指令：`python gap_fade_auto.py scan`（只測速度與涵蓋率，
+不下單）。來源比較與群益 SKCOM 的實測結論見 `LIVE_READINESS.md` §7A。
+⚠️ 仍需在**開盤日**量一次 09:00 的實際報價可見延遲（RISK1），那是最後一個未知。
 
 ## 快速開始
 
