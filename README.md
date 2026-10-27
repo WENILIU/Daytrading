@@ -26,6 +26,8 @@ v13 的兩個關鍵修正：
 | `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、上櫃涵蓋率的解法與各資料源實測 |
 | `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh`（向 finlab VIP 抓最新日 K → append → 重建因子）。<br>首次先 `--seed` 一次。見 `LIVE_READINESS.md` 第 7 節 |
 | `v13_build.py` `v13_train.py` `v13_bt.py` | 回測宇宙、walk-forward 訓練、回測引擎 |
+| `v13_sizing.py` | 倉位規則 **R9（單一來源）**：單筆上限 25%×淨值、1 張 > 25%×淨值 跳過、T-1 成交額 < 5×淨值 跳過（參與率恆 5%）。全部是相對淨值的百分比，**沒有任何寫死的金額**；`gap_fade_auto.py` 與所有回測都呼叫同一支 |
+| `backtest_dyn_pure.py` | **資金容量回測（預設入口）**：情境 A 每年 450 萬、情境 C 複利到 2,000 萬後出金，內含「純動態參與率」vs「掛 2,000 萬下限」的逐筆對照（實測兩者相同，下限從未觸發） |
 | `v13_export_model.py` | 輸出可上線模型 `v13_model.pkl`（模型與分位池，未入 repo，需自行產生） |
 | `v13_decay.py` `v13_dstune.py` `v13_frontier.py` `v13_rawedge.py` `v13_ic.py` `v13_stale2.py` | 衰退歸因、槓桿前沿、模型健全度、因子延遲 |
 | `RESEARCH_v11_expansion.md` | 研究記錄：所有試過並被否決的方向與原因 |

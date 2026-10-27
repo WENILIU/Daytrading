@@ -1,4 +1,10 @@
-"""Participation-rate sizing. floor=None -> pure dynamic 5% participation from day one."""
+"""Gap Fade v13 capital-capacity backtest (CANONICAL ENTRY POINT).
+
+Position sizing / liquidity floor = pure dynamic participation: min_turnover = 5 x equity,
+i.e. one-way participation always 5 pct at any capital. No absolute floors anywhere.
+Scenario A: every year restarts at 4.5M. Scenario C: compound, withdraw above 20M.
+Scenario B (20M floor) is kept only as a control - it never binds, results are identical.
+"""
 import pandas as pd, numpy as np, warnings, sys
 warnings.filterwarnings("ignore")
 sys.path.insert(0, ".")
