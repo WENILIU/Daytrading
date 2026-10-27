@@ -798,6 +798,8 @@ class GapFadeAutoTrader:
         self.m_pSKReply = None
         self.account = ""
         self.user_id = config.cust_cert_id
+        self._replies: list[dict] = []
+        self._report_rows: list[dict] = []
         self.yahoo = YahooQuoteClient()
         self.signals: list[Signal] = []
         self._yesterday_signals: set = set()
@@ -854,14 +856,52 @@ class GapFadeAutoTrader:
             sk.SKReplyLib, interface=sk.ISKReplyLib)
 
         # Register ReplyLib event FIRST (required before login)
+        # Report requests (GetRealBalanceReport and friends) answer ASYNCHRONOUSLY
+        # through this callback. Truncating to 100 chars and not keeping the text
+        # meant the account equity never made it into any report.
         class SKReplyLibEvent:
             def OnReplyMessage(self, bstrUserID, bstrMessages):
                 self_ref = self
-                self_ref.log.info(f"  [Reply] {bstrUserID}: {bstrMessages[:100]}")
+                text = str(bstrMessages or "")
+                self_ref._replies.append({
+                    "ts": datetime.now().isoformat(), "user": str(bstrUserID or ""),
+                    "text": text})
+                self_ref.log.info(f"  [Reply] {bstrUserID}: {text[:2000]}")
+                return -1
+
+            def OnNewData(self, bstrUserID, bstrData):
+                # Report requests answer HERE, not in OnReplyMessage: one comma
+                # separated row per call, field 1 is the market/report type
+                # (TS/TA/TL/R20...). Verified against the official sample
+                # PythonExampleV2/Reply/Reply.py:68.
+                self_ref = self
+                row = str(bstrData or "")
+                self_ref._data.append({
+                    "ts": datetime.now().isoformat(), "user": str(bstrUserID or ""),
+                    "row": row})
+                return -1
+
+            def OnData(self, bstrUserID, bstrData):
+                # Some report types push here instead of OnNewData. Capture both so
+                # the first real session settles which one the host actually uses.
+                self_ref = self
+                self_ref._data.append({
+                    "ts": datetime.now().isoformat(), "user": str(bstrUserID or ""),
+                    "row": str(bstrData or "")})
+                return -1
+
+            def OnComplete(self, bstrUserID):
+                self_ref = self
+                self_ref._data.append({"ts": datetime.now().isoformat(),
+                                       "user": str(bstrUserID or ""), "row": "<COMPLETE>"})
                 return -1
 
         reply_event = SKReplyLibEvent()
         reply_event.log = self.log
+        # The callback object is not the trader, so hand it the same list object
+        # (same trick as .log above). Appends then land in self._replies too.
+        reply_event._replies = self._replies
+        reply_event._data = self._report_rows
         self._reply_handler = comtypes.client.GetEvents(
             self.m_pSKReply, reply_event)
 
@@ -875,6 +915,14 @@ class GapFadeAutoTrader:
         if nCode != 0:
             raise ConnectionError(f"Login failed: {msg}")
         self.log.info(f"Login OK: {msg}")
+
+        # The reply host is a SEPARATE connection that must be opened explicitly
+        # (official sample: PythonExampleV2/Reply/Reply.py:496). Without it every
+        # report request returns SK_SUCCESS and then delivers nothing at all -
+        # which is exactly what GetRealBalanceReport was doing.
+        nCode = self.m_pSKReply.SKReplyLib_ConnectByID(self.user_id)
+        self.log.info(f"  Reply host: "
+                      f"{self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)}")
 
         # Connect to quote server (real-time stock data for scanning)
         nCode = self.quote_lib.SKQuoteLib_EnterMonitorLONG()
@@ -2785,11 +2833,50 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         self.log.info("PAPER MODE - real orders at prices that cannot fill")
         try:
             nCode = self.m_pSKOrder.GetRealBalanceReport(self.user_id, self.account)
+            center_code = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)
             self.log.info(f"  GetRealBalanceReport -> "
-                          f"{self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)} "
-                          f"(the balance itself arrives on the Reply channel)")
+                          f"{self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)}")
+            reply = self._wait_for_timeout_free_balance()
+            if reply:
+                self.exec_stats["account_balance"] = reply["text"]
+                self.log.info(f"  account equity reply:\n{reply['text'][:1500]}")
+            else:
+                self.log.warning("  no balance data within 6s. The reply host is connected "
+                                 f"(request returned {center_code}), so this is either a "
+                                 "session-hours restriction or a channel this host does not "
+                                 "use. Non-blocking: the three feasibility gates do not "
+                                 "depend on it.")
         except Exception as e:
             self.log.warning(f"  GetRealBalanceReport failed: {e}")
+
+    def _wait_for_timeout_free_balance(self):
+        # The host labels the cash report differently across versions, so match
+        # loosely and fall back to whatever arrives.
+        for keys in (("現金", "cash", "餘額", "balance"), ("913R", "918D"), ()):
+            r = self._wait_for_reply(keys, timeout_sec=2.0)
+            if r:
+                return r
+        return None
+
+    def _wait_for_reply(self, keywords: tuple[str, ...] = (), timeout_sec: float = 6.0):
+        """Block until the Reply channel delivers something (optionally matching a
+        keyword). Report requests are asynchronous, so without this the balance
+        simply never arrives before we disconnect."""
+        deadline = time.time() + timeout_sec
+        start_r, start_d = len(self._replies), len(self._report_rows)
+        while time.time() < deadline:
+            for r in self._replies[start_r:]:
+                if not keywords or any(k.lower() in r["text"].lower() for k in keywords):
+                    return {"ts": r["ts"], "text": r["text"]}
+            for d in self._report_rows[start_d:]:
+                if d["row"] == "<COMPLETE>":
+                    rows = [x["row"] for x in self._report_rows[start_d:] if x["row"] != "<COMPLETE>"]
+                    if rows and (not keywords or any(k.lower() in "\n".join(rows).lower() for k in keywords)):
+                        return {"ts": d["ts"], "text": "\n".join(rows)}
+                if not keywords and d["row"]:
+                    return {"ts": d["ts"], "text": d["row"]}
+            time.sleep(0.25)
+        return None
 
     def _probe_price(self, sig: Signal) -> float:
         """A limit price that cannot trade: 跌停 for a buy, 漲停 for a sell."""

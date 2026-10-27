@@ -5,7 +5,7 @@
 
 ---
 
-## 0. 本輪修掉的三個真實缺陷
+## 0. 本輪修掉的四個真實缺陷
 
 ### 0.1 `nQty` 是「張數」不是「股數」（最嚴重）
 `6.下單-證券智慧單.docx` 對 `STOCKSTRATEGYORDER` 的定義：
@@ -35,6 +35,18 @@ v13 的停損是 `min(4%, 漲停價 − 1 tick)`。智慧單的**百分比**停�
 回測仍以 13:25 平倉結算，兩者差 5 分鐘；先前量過影響 < 0.1%/筆。
 
 ---
+
+### 0.4 回報主機從來沒有連線（影響 live 不只 paper）
+`connect()` 註冊了 `ISKReplyLibEvents` 事件，但**從未呼叫 `SKReplyLib_ConnectByID`**——
+那是另一條要單獨開啟的連線（官方範例 `PythonExampleV2/Reply/Reply.py:496`）。
+後果：所有走回報通道的东西都是盲的——成交回報、智慧單狀態、資產報表。
+`GetRealBalanceReport` 會回 `SK_SUCCESS` 然後什麼都不回來，看起來像成功、其實永遠沒資料。
+
+已修：登入後連線回報主機，並補上 `OnNewData` / `OnData` / `OnComplete` 三個通道
+（不同報表型別走的通道不一樣，先都收下來）。實測 `Reply host: SK_SUCCESS`。
+
+尚未結：盤後（23:00）實測仍然收不到資產資料，`GetRealBalanceReport` 在裸物件上甚至回
+`SK_ERROR_INITIALIZE_FAIL`。這不阻擋三項可行性判定，第一次盤中 `paper` 實跑會把它結算掉。
 
 ## 1. 風險一：開盤報價可見延遲 — **尚未量到**
 
