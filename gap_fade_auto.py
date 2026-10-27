@@ -432,12 +432,10 @@ class Config:
     # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
     max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
     max_lot_value_pct = 0.25  # dynamic: skip if 1 lot > 25% of equity (scales with capital)
-    # Minimum T-1 turnover = this factor x current equity (5% participation rate).
-    # Replaces old dv_cap=10% approach. Instead of capping position in illiquid stocks,
-    # we skip them entirely. Dynamic: scales with capital.
-    # At 4.5M: min_turnover = 5 x 4.5M = 22.5M (only trade stocks with >2250M daily vol)
-    # At 10M: min_turnover = 5 x 10M = 50M
-    min_turnover_factor = 5.0
+    # Minimum T-1 turnover to trade a stock (absolute, fixed).
+    # 30M = participation rate < 4% at 4.5M capital (safe, zero market impact).
+    # When capital grows past ~20M, revisit this threshold.
+    min_turnover = 30_000_000  # 3000萬
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1687,12 +1685,11 @@ class GapFadeAutoTrader:
                 skipped_lot_coarse += 1
                 continue
             target_value = min(pos_pct * budget, self.config.max_per_trade_pct * budget)
-            # Liquidity filter: skip stocks with T-1 turnover below threshold.
-            # Dynamic: threshold = min_turnover_factor x current equity (5% participation).
-            # This replaces the old dv_cap approach (cap position at 10% of volume).
-            # Better: don't trade illiquid stocks at all, rather than trade them small.
+            # Liquidity filter: skip stocks with T-1 turnover below 30M.
+            # At 4.5M capital, max position 1.125M / 30M = 3.75% participation (safe).
+            # Revisit when capital exceeds ~20M.
             t1tv = float(getattr(sig, "prev_turnover", 0.0) or 0.0)
-            min_tv = self.config.min_turnover_factor * budget
+            min_tv = self.config.min_turnover
             if t1tv > 0 and t1tv < min_tv:
                 self.log.info(f"  {sig.symbol}: T-1 turnover {t1tv/1e6:.0f}M < "
                               f"min {min_tv/1e6:.0f}M (5% participation), SKIP")
