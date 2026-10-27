@@ -433,9 +433,11 @@ class Config:
     max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
     max_lot_value_pct = 0.25  # dynamic: skip if 1 lot > 25% of equity (scales with capital)
     # Minimum T-1 turnover to trade a stock (absolute, fixed).
-    # 30M = participation rate < 4% at 4.5M capital (safe, zero market impact).
-    # When capital grows past ~20M, revisit this threshold.
-    min_turnover = 30_000_000  # 3000萬
+    # At 4.5M: max position 112萬 / 1000萬 = 11% participation (safe for typical 5% positions).
+    # In practice the model (pred_q>=0.20) already avoids illiquid stocks,
+    # so this threshold rarely binds. It is a safety net for edge cases.
+    # Revisit when capital exceeds ~10M.
+    min_turnover = 10_000_000  # 1000萬
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
