@@ -432,12 +432,12 @@ class Config:
     # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
     max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
     max_lot_value_pct = 0.25  # dynamic: skip if 1 lot > 25% of equity (scales with capital)
-    # One order must not exceed this fraction of the name's T-1 turnover (0 = off).
-    # Measured 2026-10-27 (v13_sizing_lab R9/R10): 10 pct costs 4 pp of CAGR
-    # (155.4 -> 151.4) with MDD unchanged; 5 pct costs 10 pp. Adopted at 10 pct
-    # because the backtest prices assume zero impact and a 12 pct-of-turnover order
-    # does not fill at the quoted price.
-    max_dv1_frac = 0.10
+    # Minimum T-1 turnover = this factor x current equity (5% participation rate).
+    # Replaces old dv_cap=10% approach. Instead of capping position in illiquid stocks,
+    # we skip them entirely. Dynamic: scales with capital.
+    # At 4.5M: min_turnover = 5 x 4.5M = 22.5M (only trade stocks with >2250M daily vol)
+    # At 10M: min_turnover = 5 x 10M = 50M
+    min_turnover_factor = 5.0
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1687,22 +1687,20 @@ class GapFadeAutoTrader:
                 skipped_lot_coarse += 1
                 continue
             target_value = min(pos_pct * budget, self.config.max_per_trade_pct * budget)
-            # Impact cap: one order must not exceed 10 pct of the name's T-1 turnover.
-            # T's own turnover is unknown at 09:00, so T-1 is the only legal proxy.
-            # Measured (v13_sizing_lab R9): costs 4 pp of CAGR over 19 years but the
-            # worst order falls from 12.1 pct to 8.4 pct of the day's traded value,
-            # which is the part the backtest cannot model at all.
+            # Liquidity filter: skip stocks with T-1 turnover below threshold.
+            # Dynamic: threshold = min_turnover_factor x current equity (5% participation).
+            # This replaces the old dv_cap approach (cap position at 10% of volume).
+            # Better: don't trade illiquid stocks at all, rather than trade them small.
             t1tv = float(getattr(sig, "prev_turnover", 0.0) or 0.0)
-            if self.config.max_dv1_frac and t1tv > 0:
-                target_value = min(target_value, self.config.max_dv1_frac * t1tv)
+            min_tv = self.config.min_turnover_factor * budget
+            if t1tv > 0 and t1tv < min_tv:
+                self.log.info(f"  {sig.symbol}: T-1 turnover {t1tv/1e6:.0f}M < "
+                              f"min {min_tv/1e6:.0f}M (5% participation), SKIP")
+                skipped_impact_capped += 1
+                continue
             shares = int(target_value / lot_value) * 1000
             if shares < 1000:
-                if t1tv > 0 and self.config.max_dv1_frac and self.config.max_dv1_frac * t1tv < lot_value:
-                    skipped_impact_capped += 1
-                    self.log.info(f"  {sig.symbol}: 1 zhang > {self.config.max_dv1_frac*100:.0f}% of "
-                                  f"T-1 turnover ({self.config.max_dv1_frac*t1tv:,.0f}), SKIP")
-                else:
-                    self.log.info(f"  {sig.symbol}: < 1 zhang after per-trade cap, SKIP")
+                self.log.info(f"  {sig.symbol}: < 1 zhang after sizing, SKIP")
                 continue
 
             # Zero-margin hard cap: total notional <= equity (sequential, shrink to fit)

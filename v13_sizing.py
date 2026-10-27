@@ -18,7 +18,7 @@ Rule R9, measured 2026-10-27 (see STRATEGY.md section 2, sizing lab):
 import numpy as np
 
 # adopted for live trading
-R9 = {"name": "R9", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": None, "floor_lot_pct": 0.25, "dv_cap": 0.10}
+R9 = {"name": "R9", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": None, "floor_lot_pct": 0.25, "dv_cap": None, "min_turnover_factor": 5.0}
 R6 = {"name": "R6", "scale": 1.0, "cap": 1_000_000, "floor_lot": 250_000}
 R7 = {"name": "R7", "scale": 0.5, "cap": 1_000_000, "floor_lot": 250_000}
 FLOOR_ONLY = {"name": "floor", "scale": 1.0}
@@ -36,6 +36,9 @@ def lots_for(rule, w, px, cash_left, dv1=np.nan, capital=4_500_000):
         tgt = min(tgt, rule["cap"])
     if rule.get("cap_pct") is not None:
         tgt = min(tgt, rule["cap_pct"] * capital)
+    if rule.get("min_turnover_factor") is not None and np.isfinite(dv1) and dv1 > 0:
+        if float(dv1) < rule["min_turnover_factor"] * capital:
+            return 0
     if rule.get("dv_cap") is not None and np.isfinite(dv1) and dv1 > 0:
         tgt = min(tgt, rule["dv_cap"] * float(dv1))
     if rule.get("dv_skip") is not None and np.isfinite(dv1) and dv1 > 0 and lot > rule["dv_skip"] * float(dv1):
@@ -67,6 +70,9 @@ def skip_reason(rule, w, px, dv1=np.nan, capital=4_500_000):
         tgt = min(tgt, rule["cap"])
     if rule.get("cap_pct") is not None:
         tgt = min(tgt, rule["cap_pct"] * capital)
+    if rule.get("min_turnover_factor") is not None and np.isfinite(dv1) and dv1 > 0:
+        if float(dv1) < rule["min_turnover_factor"] * capital:
+            return 0
     if rule.get("dv_cap") is not None and np.isfinite(dv1) and dv1 > 0:
         tgt = min(tgt, rule["dv_cap"] * float(dv1))
     if tgt < lot:
