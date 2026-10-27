@@ -439,6 +439,12 @@ class Config:
     # At 4.5M: 2250萬 | At 10M: 5000萬 | At 20M: 1億
     # Participation rate always <= 5% one-way, <= 10% round-trip (day trade).
     min_turnover_factor = 5.0  # min_turnover = factor x equity
+    # Operational safety net only, NOT a performance rule. There is no count limit in the
+    # strategy: capital (zero margin) is the gate. Measured on 2014-2026 (count_cap.py):
+    # 34 candidates/day pass the filters, 9.4 get funded, p99 = 22, max = 26. 30 therefore
+    # never binds on performance; it only bounds API load and order races on freak days
+    # (up to 545 candidates in one day).
+    max_orders_per_day = 30
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
 
@@ -1633,12 +1639,19 @@ class GapFadeAutoTrader:
         self.log.info("STEP 2: Placing orders at open...")
 
         total_exposure = 0
+        orders_placed = 0
 
         skipped_at_limit = 0
         skipped_impact_capped = 0
         skipped_lot_coarse = 0
+        skipped_order_cap = 0
 
         for sig in self.signals:
+            # Operational cap: signals are sorted by pred_q desc, so everything after the
+            # cap is lower-ranked anyway. Stop instead of continuing to save API calls.
+            if orders_placed >= self.config.max_orders_per_day:
+                skipped_order_cap = len(self.signals) - orders_placed
+                break
             if sig.is_at_limit:
                 skipped_at_limit += 1
                 continue
@@ -1739,16 +1752,21 @@ class GapFadeAutoTrader:
 
             # Place order
             self._place_entry_order(sig)
+            orders_placed += 1
 
         self.exec_stats["t_submit_last"] = time.time()
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
         if skipped_impact_capped:
-            self.log.info(f"  Skipped (1 zhang > {self.config.max_dv1_frac*100:.0f}% of T-1 turnover): "
-                          f"{skipped_impact_capped}")
+            self.log.info(f"  Skipped (T-1 turnover < {self.config.min_turnover_factor}x equity, "
+                          f"5 pct participation cap): {skipped_impact_capped}")
         if skipped_lot_coarse:
-            self.log.info(f"  Skipped (1 zhang value > {self.config.max_lot_value:,.0f}, lot too coarse): "
-                          f"{skipped_lot_coarse}")
+            self.log.info(f"  Skipped (1 zhang > {self.config.max_lot_value_pct*100:.0f}% of equity, "
+                          f"lot too coarse): {skipped_lot_coarse}")
+        if skipped_order_cap:
+            self.log.warning(f"  ORDER CAP HIT: {skipped_order_cap} lower-ranked signals not sent "
+                             f"(cap {self.config.max_orders_per_day}). Check candidate count.")
+        self.log.info(f"  Orders placed: {orders_placed}")
         self.log.info(
             f"  Total exposure: {total_exposure:,.0f} "
             f"({total_exposure/self.config.capital*100:.0f}%)")
