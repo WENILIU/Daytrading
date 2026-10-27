@@ -83,7 +83,7 @@ def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_
     yr_ret = (eq_s.iloc[-1] / eq_start - 1) * 100
     yr_dd = ((eq_s - eq_s.cummax()) / eq_s.cummax()).min() * 100
     shp = ret.mean() / ret.std() * np.sqrt(243) if ret.std() > 0 else 0
-    return eq_s.iloc[-1], yr_ret, yr_dd, shp, n_total, len(yd), min_tv
+    return eq_s.iloc[-1], yr_ret, yr_dd, shp, n_total, len(yd), min_tv, eq_s
 
 
 def scenario_each_year(floor, label, use_k_model=True, use_ds=True, min_pos_pct=0.0):
@@ -97,7 +97,7 @@ def scenario_each_year(floor, label, use_k_model=True, use_ds=True, min_pos_pct=
         r = run_year(4_500_000, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
-        final, ret, dd, shp, nt, nd, mtv = r
+        final, ret, dd, shp, nt, nd, mtv, _ser = r
         pnl = (final - 4_500_000) / 1e4
         tot += pnl
         rows.append((y, ret, dd, shp, nt / nd, pnl, mtv))
@@ -114,18 +114,36 @@ def scenario_compound(floor, cap_eq, label, use_k_model=True, use_ds=True, min_p
     print("=" * 78)
     print(f"{'Year':<6} {'Start(wan)':<11} {'Ret%':<8} {'End(wan)':<10} {'Withdraw':<10} {'CumWD':<8} {'MDD%':<7} {'minTV(wan)'}")
     print("-" * 78)
-    eq = 4_500_000; wd = 0
+    eq = 4_500_000; wd = 0; _trace = []; _series = []
     for y in range(2014, 2027):
         r = run_year(eq, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
-        final, ret, dd, shp, nt, nd, mtv = r
+        final, ret, dd, shp, nt, nd, mtv, ser = r
+        if cap_eq is None:
+            _series.append(ser)
         w = 0
-        if final > cap_eq:
+        if cap_eq is not None and final > cap_eq:
             w = final - cap_eq; final = cap_eq; wd += w
         print(f"{y:<6} {eq/1e4:<11.0f} {ret:<8.1f} {final/1e4:<10.0f} {w/1e4:<10.0f} {wd/1e4:<8.0f} {dd:<7.1f} {mtv/1e4:.0f}")
+        _trace.append((y, eq, ret, final, dd, mtv))
         eq = final
     print(f"\n  trading capital {eq/1e4:,.0f} wan | withdrawn {wd/1e4:,.0f} wan | TOTAL {((eq+wd)/1e8):.2f} yi")
+    yrs = len(_trace)
+    if yrs:
+        cagr = ((eq + wd) / 4_500_000) ** (1 / yrs) - 1
+        peak = 4_500_000; mdd = 0.0
+        for y, e0, r, e1, dd, mtv in _trace:
+            peak = max(peak, e1); mdd = min(mdd, (e1 - peak) / peak * 100)
+        print(f"  PATH CAGR {cagr*100:.1f}% over {yrs}y | worst year {min(t[2] for t in _trace):.1f}% | path MDD {mdd:.1f}%")
+        print(f"  final equity {eq/1e8:.2f} yi (no withdrawal)")
+        if _series:
+            chain = pd.concat(_series)
+            curve = 4_500_000 * (1 + chain.pct_change().fillna(0)).cumprod()
+            dd = ((curve - curve.cummax()) / curve.cummax()).min() * 100
+            r = curve.pct_change().dropna()
+            sh = r.mean() / r.std() * np.sqrt(243)
+            print(f"  DAILY-CURVE path MDD {dd:.2f}% | Sharpe {sh:.2f} | {len(curve)} trading days")
 
 
 if __name__ == "__main__":
@@ -136,4 +154,6 @@ if __name__ == "__main__":
     scenario_each_year(None, "D) LIVE-EXACT config (k_model OFF, direction-balance OFF, min_pos_pct 0.5 pct)",
                      use_k_model=False, use_ds=False, min_pos_pct=0.005)
     scenario_compound(None, 20_000_000, "E) LIVE-EXACT | compound then withdraw above 2000wan",
+                      use_k_model=False, use_ds=False, min_pos_pct=0.005)
+    scenario_compound(None, None, "F) LIVE-EXACT | PURE COMPOUNDING, no cap (dynamic participation only)",
                       use_k_model=False, use_ds=False, min_pos_pct=0.005)
