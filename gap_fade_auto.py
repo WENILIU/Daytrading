@@ -2878,6 +2878,49 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             time.sleep(0.25)
         return None
 
+    def _paper_state_path(self) -> Path:
+        p = self.config.equity_state_path
+        return p.with_name(p.stem + "_paper.json")
+
+    def _load_equity_state(self):
+        """Paper reads only its own state file.
+
+        The drawdown brake is driven by peak/current equity. If a simulated day
+        leaked into the file `live` reads, the next live session would start
+        already braked. That is the same trap as the sim residue fixed in
+        LIVE_READINESS 8.2; paper is just a newer source of it.
+        """
+        path = self._paper_state_path()
+        if not path.exists():
+            self.log.info("  no paper equity state - starting from config.capital "
+                          f"({self.config.capital:,.0f}); live's "
+                          f"{self.config.equity_state_path.name} is not read here")
+            return
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self._peak_equity = state.get("peak_equity", self.config.capital)
+            self._current_equity = state.get("current_equity", self.config.capital)
+            self.log.info(f"  Loaded PAPER equity state: peak={self._peak_equity:,.0f} "
+                          f"current={self._current_equity:,.0f}")
+        except Exception as e:
+            self.log.warning(f"  paper equity state unreadable: {e}")
+
+    def _save_equity_state(self):
+        """Persist to the paper file only - never to the one `live` reads."""
+        path = self._paper_state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "peak_equity": self._peak_equity,
+                "current_equity": self._current_equity,
+                "updated": datetime.now().isoformat(),
+                "note": "paper mode - simulated PnL, deliberately NOT used by live",
+            }, indent=2), encoding="utf-8")
+            self.log.info(f"  equity state -> {path.name} "
+                          f"(live's {self.config.equity_state_path.name} untouched)")
+        except Exception as e:
+            self.log.warning(f"  paper equity state not saved: {e}")
+
     def _probe_price(self, sig: Signal) -> float:
         """A limit price that cannot trade: 跌停 for a buy, 漲停 for a sell."""
         limit_up, limit_down = calc_price_limits(sig.prev_close)
