@@ -217,8 +217,14 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
 
 ## 6. 上實盤前的檢查清單
 
-1. 每日開盤前 `python v13_factors.py --refresh`（已向 finlab VIP 抓最新日 K，
-   面板停在 2026-10-22）。面板過期時程式自動改餵 NaN（與回測一致）並印警告。
+1. **因子面板時效（每天都要看）**：先跑 `python v13_factors.py --refresh`
+   （向 finlab VIP 抓最新日 K）。啟動日誌裡必須看到這一行且 lag 為 0 或 1：
+   `Factor panel as-of <日期> (lag 0d), turnover keys <N>`。
+   若出現 `FACTOR PANEL STALE by Nd (> 10d). Feeding NaN factors...`，代表模型改餵 NaN
+   （與回測對缺日期的處理一致），**當天不要上實盤**：同一引擎實測把面板欄位拿掉，
+   2023-25 段從 1692% 掉到 260%。面板價值的量化：停 20 天 ≈ 損失 3% 每筆邊際，
+   停 60 天 ≈ 11%。本輪就發生過面板停在 2026-08-19（落後 68 天）≈ 11% 邊際。
+   注意 `is_vip()=False` 是 legacy token 登入下的假訊號，不代表沒有權限，不要因此跳過 refresh。
 2. **開盤日 08:58 跑 `python gap_fade_auto.py scan`**（09:00 前啟動即可，
    它會自己輪詢到 09:01:00）。要確認兩件事：
    `by_exchange` 裡 TPEx 有 851 檔，以及 `RISK1 exchange opening-print time`
@@ -232,7 +238,14 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
    `Restricted from finlab ... 14 處置 (both markets)` 這行；若看到
    `came from the exchange announcement pages` 或 `DISPOSAL PANEL STALE`
    代表退化了，當天不要上實盤。
-5. 上櫃涵蓋率已解決（§7A），203% 不再是「只能下單一半市場」的數字；
+6. **下單筆數安全網（新增）**：策略本身沒有筆數上限，筆數由零融資的現金額度決定
+   （實測 34 個候選/日 → 成交 9.4 筆/日，p99 = 22、max = 26，見 `count_cap.py`）。
+   `Config.max_orders_per_day = 30` 只是作業安全網，**不是績效規則**。
+   收盤報告看 `Orders placed: N`：正常 N ≈ 9，接近 20 就已经是歷史高位區間。
+   若出現 `ORDER CAP HIT: <k> lower-ranked signals not sent (cap 30)`，代表那天超出歷史
+   範圍（候選數與可成交數都超過實測上限），先查當天的候選數與曝險，**不要直接調高上限**——
+   30 是照 450 萬的資金額度算出來的，調高等於假設資金也變大。
+7. 上櫃涵蓋率已解決（§7A），203% 不再是「只能下單一半市場」的數字；
    但 RISK1 未量測前，仍不建議直接全倉。
 
 ---
