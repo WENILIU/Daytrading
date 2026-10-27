@@ -431,7 +431,7 @@ class Config:
     # Measured: CAGR 155.4 pct / MDD -3.6 pct / Calmar 43.2, vs floor-only
     # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
     max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
-    max_lot_value = 250_000
+    max_lot_value_pct = 0.25  # dynamic: skip if 1 lot > 25% of equity (scales with capital)
     # One order must not exceed this fraction of the name's T-1 turnover (0 = off).
     # Measured 2026-10-27 (v13_sizing_lab R9/R10): 10 pct costs 4 pp of CAGR
     # (155.4 -> 151.4) with MDD unchanged; 5 pct costs 10 pp. Adopted at 10 pct
@@ -1680,9 +1680,10 @@ class GapFadeAutoTrader:
             # R6 sizing (v13_sizing_lab.py, measured 2026-10-27): skip names whose
             # 1-lot value exceeds the cap, cap notional per trade, floor to lots.
             lot_value = entry_price * 1000
-            if lot_value > self.config.max_lot_value:
+            dynamic_floor = self.config.max_lot_value_pct * budget
+            if lot_value > dynamic_floor:
                 self.log.info(f"  {sig.symbol}: 1 zhang = {lot_value:,.0f} > "
-                              f"{self.config.max_lot_value:,.0f}, SKIP (lot too coarse)")
+                              f"25% equity ({dynamic_floor:,.0f}), SKIP (lot too coarse)")
                 skipped_lot_coarse += 1
                 continue
             target_value = min(pos_pct * budget, self.config.max_per_trade_pct * budget)
