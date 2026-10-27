@@ -3134,10 +3134,19 @@ if __name__ == "__main__":
                      f"09:00:00 (n={n}):")
             log.info(f"    p50={q(0.5):.2f}s  p90={q(0.9):.2f}s  "
                      f"p99={q(0.99):.2f}s  max={lats[-1]:.2f}s")
-            if first_visible:
+            if first_visible and first_visible - open_dt.timestamp() <= 120:
                 log.info(f"  RISK1 first openPrice we could read: "
                          f"{first_visible - open_dt.timestamp():.2f}s after "
                          f"09:00:00")
+            else:
+                # Running after the close, first_visible is "hours ago" and the
+                # number means nothing. The exchange-side percentiles above DO
+                # still apply - they come from the feed's own open timestamp for
+                # today's session, not from when this process happened to poll.
+                log.info("  RISK1 our-own first readable price: not measured "
+                         "(this run did not straddle 09:00). The percentiles "
+                         "above are the feed's open timestamps for today's "
+                         "session and remain valid.")
         else:
             log.info("  RISK1: feed is live but carries no openTime field "
                      "(TWSE MIS fallback). Re-run when Fugle answers.")
