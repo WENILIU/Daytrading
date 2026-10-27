@@ -387,7 +387,9 @@ class Config:
     gap_short_min = 0.015           # SHORT: adj_gap >= +1.5 pct
     gap_long_min = 0.05             # LONG:  adj_gap <= -5.0 pct
     min_price = 30                  # prev_close >= 30 TWD
-    min_turnover_t1 = 10_000_000    # T-1 daily turnover >= 10M TWD
+    # T-1 turnover floor is NOT a fixed amount: it is derived from current
+    # equity via min_turnover_factor (see _min_turnover_floor) so the
+    # participation rate stays 5 pct at any capital size.
     benchmark_no = "0050"           # opening-gap benchmark, observable at 09:00
 
     # ===== v13 MODEL (exported by v13_export_model.py) =====
@@ -1106,7 +1108,7 @@ class GapFadeAutoTrader:
                 t1tv = self._t1_turnover.get(stock_no)
                 if t1tv is None:
                     t1tv = volume * open_price  # proxy when panel unavailable
-                if t1tv < self.config.min_turnover_t1:
+                if t1tv < self._min_turnover_floor():
                     continue
 
                 # Skip restricted (處置股)
@@ -1451,7 +1453,7 @@ class GapFadeAutoTrader:
                 dropped["no_turnover_data"] += 1
                 keep.append(code)
                 continue
-            if t1tv < self.config.min_turnover_t1:
+            if t1tv < self._min_turnover_floor():
                 dropped["turnover"] += 1
                 continue
             keep.append(code)
@@ -1689,7 +1691,7 @@ class GapFadeAutoTrader:
             # Liquidity filter: dynamic 5% participation rate.
             # min_turnover = 5 x equity. Scales with capital automatically.
             t1tv = float(getattr(sig, "prev_turnover", 0.0) or 0.0)
-            min_tv = self.config.min_turnover_factor * budget
+            min_tv = self._min_turnover_floor()
             if t1tv > 0 and t1tv < min_tv:
                 self.log.info(f"  {sig.symbol}: T-1 turnover {t1tv/1e6:.0f}M < "
                               f"min {min_tv/1e6:.0f}M (5% participation), SKIP")
@@ -2471,6 +2473,15 @@ class GapFadeAutoTrader:
             path.write_text(json.dumps(state, indent=2), encoding='utf-8')
         except Exception as e:
             self.log.warning(f"  Failed to save equity state: {e}")
+
+    def _min_turnover_floor(self) -> float:
+        """Dynamic T-1 turnover floor = min_turnover_factor x current equity.
+
+        One-way participation stays 5 pct: max position is 25 pct of equity,
+        so 25 / 5 = 5 pct of the stock T-1 turnover. Scales with capital
+        (4.5M -> 2250wan, 10M -> 5000wan, 20M -> 1yi). No absolute floor.
+        """
+        return self.config.min_turnover_factor * self._current_equity
 
     # ----------------------------------------------------------
     # MAIN LOOP

@@ -16,7 +16,7 @@
 | 個股調整 | `adj_gap = (open/prev_close - 1) - market_gap` |
 | SHORT | `adj_gap >= +1.5%` |
 | LONG | `adj_gap <= -5.0%`（1.5-5% 的 LONG 在無前視下為負邊際，已剔除） |
-| 排除 | 開盤鎖死漲/跌停、處置股（TWSE+TPEx 官方公告）、T-1 成交額 < 1,000 萬、股價 < 30 元、無可借券 |
+| 排除 | 開盤鎖死漲/跌停、處置股（TWSE+TPEx 官方公告）、T-1 成交額 < 5×淨值（動態 5% 參與率）、股價 < 30 元、無可借券 |
 
 ### 模型選股（取代早期手寫 score 制）
 HistGradientBoosting 兩段式 walk-forward（逐年重訓，只用往年資料）：
@@ -46,6 +46,11 @@ pos = base_pos(pred_q) × position_multiplier
 pos = min(pos, 25%)，且當日總名義 ≤ 淨值（零融資）
 張數 = int(pos × equity / 價格 / 1000) × 1000   # 整張，不足一張跳過
 ```
+**流動性／高價股門檻全部是動態百分比，沒有寫死的金額**（`v13_sizing.py` R9 為單一來源）：
+- 單筆上限 = 25% × 淨值；1 張 > 25% × 淨值 → 跳過（整張粒度太粗）
+- 流動性過濾 = T-1 成交額 < 5 × 淨值 → 跳過。單筆最大 25% ÷ 5 = **參與率恆為 5%**（往復 10%）
+- 隨資金自動縮放：450 萬 → 2,250 萬｜1,000 萬 → 5,000 萬｜2,000 萬 → 1 億
+
 `position_multiplier` 是唯一槓桿旋鈕（前沿：0.6 / 1.0 / 1.5）。
 **沒有** vol targeting、direction-balance（`ds`）、circuit breaker——前兩者在回測中無效或為隱形槓桿，
 後者實務上來不及反應。
