@@ -230,8 +230,10 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
    `by_exchange` 裡 TPEx 有 851 檔，以及 `RISK1 exchange opening-print time`
    那組 p50/p90/p99。這是上實盤前**唯一**還沒量到的關鍵數字。
    已排 08:55 自動提醒（見 §1 結尾）。
-3. 再跑一次 `python gap_fade_auto.py live`，確認收盤報告的
-   `RISK1 opening price visible` 與 `MARKET COVERAGE` 兩行。
+3. **先跑 `python gap_fade_auto.py paper`（不是 live）**：真實帳戶、真實智慧單，但掛在不可能成交的價格，
+   零風險。收盤會印 `LIVE FEASIBILITY REPORT` 與三項 PASS/FAIL（詳見 §11）。
+   三項全 PASS 才升級到 `live`；届时再確認收盤報告的 `RISK1 opening price visible`
+   與 `MARKET COVERAGE` 兩行。
 4. 在群益 App 確認 09:00 那批智慧單是**當日**、且停損停利條件正確。
 5. 處置/當沖過濾**不需要手動步驟**：`get_restricted_stocks()` 開盤掃描時直接
    向 finlab 取（§7C）。日誌一定要看到
@@ -713,3 +715,53 @@ Scan done in 1.3s (898 valid quotes)
   但「券商端實際生效的停損停利條件」沒有回讀驗證。要在群益 App 對。
 - **盤中觸發順序**：1 分 K 才有，日誌只有 60 秒一次的取價快照。
 - **融資額度**：零融資設定下不會觸發，但額度實際多少沒有查。
+---
+
+## 11. 群益能不能下模擬單？——**不能**，所以有 `paper` 模式（2026-10-27）
+
+直接查裝在機器上的型別程式庫（`D:\CapitalAPI\CapitalAPI_2.13.59_PythonExample\元件\x64\SKCOM.dll`）：
+
+| 查證項目 | 結果 |
+|---|---|
+| `ISKOrderLib` 全部方法 | 155 個，**沒有任何試單／模擬單／paper 單**（只有 `PingandTracertTest`、`TelnetTest` 這種網路測試） |
+| `SendStockStrategyDayTrade` 第二個參數 | 是 `bAsyncOrder`（非同步送單），**不是**模擬旗標。官方範例 `PythonExampleV2/Order/TS/TSStrategyOrder/TSStrategyOrder.py:792` 寫得很清楚 |
+| 唯一的沙箱 | `SKCenterLib_SetAuthority(2)` = 測試環境。但那是**另一台伺服器＋另一個帳戶**，證明不了「我的帳戶能不能交易」 |
+
+### 所以 `paper` 模式怎麼做
+
+保留所有真實依賴，只把風險拿掉：
+
+1. **全部是真的**：真實登入、真實報價、真實掃描／模型／倉位，與 `live` 完全同一條程式路徑。
+2. **用價格把風險歸零**：每個訊號都送一張**真的智慧單**（群益 App 看得到），但只有 `1 張`，
+   且掛在不可能成交的價格——**買單掛跌停、賣單掛漲停**。万一真的成交，13:20 的時間平倉會自動收掉，
+   最壞情況就是 1 張、幾個小時。
+3. **真正的部位在內部位於模擬**：完整張數與真實 SL/TP 用即時報價以 `paper_poll_sec`（預設 10 秒）推演，
+   所以還是會產出損益、勝率，以及回測永遠不知道的那個數字——**進場價到底成交不成交得了解**。
+
+### 它會給你什麼
+
+收盤後 `LIVE FEASIBILITY REPORT (paper)` ＋ `trading_logs/paper_report_YYYYMMDD.json`，三項硬標準：
+
+| 檢查 | 標準 | 為什麼要看 |
+|---|---|---|
+| 送單接受率 | 100%（0 拒單） | 帳戶權限、資券、額度、下單密碼全部會在這裡暴露 |
+| `submit→ack` | p90 < 2000 ms | 22 檔一次送完的吞吐夠不夠 |
+| 進場可成交性 | 不利滑價 p90 < 0.5% | 這是 RISK1 的實戰版：開盤價看得到、但買不買得到是另一件事 |
+
+外加模擬帳（筆數、勝率、含成本總損益、出場原因分布）。
+
+### 執行方式
+
+```bash
+python gap_fade_auto.py paper     # 只在交易日 08:55-13:40 之間有效，其他時間直接拒絕執行
+```
+
+時段保護是刻意加的：夜間跑會掃到今天收盤的舊開盤價、所有單都被拒，verdict 會誤判。
+
+### 尚未做
+
+`paper` 模式已通過離線煙霧測試（探測價＝跌停/漲停、滑價符號、報告與 PASS/FAIL 皆正確），
+但**還沒有在真實開盤跑過一次**。第一次實跑要在下一個交易日 08:55 後執行。
+
+---
+

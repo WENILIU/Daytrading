@@ -51,7 +51,7 @@ v13 的三個關鍵修正：
 | 檔案 | 用途 |
 |---|---|
 | `STRATEGY.md` | 完整策略說明、參數、績效、衰退審計、實盤要求 |
-| `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|sim\|now\|scan]`，`scan` 只測全市場掃描速度與涵蓋率 |
+| `gap_fade_auto.py` | 實盤／模擬下單（群益 SKCOM 智慧單）。`python gap_fade_auto.py [live\|paper\|sim\|now\|scan]`。`paper` = 真實帳戶＋真實智慧單但掛在不可能成交的價格（群益沒有模擬單 API，見 `LIVE_READINESS.md` §11）；`scan` 只測全市場掃描速度與涵蓋率 |
 | `v13_live_risk.py` | 上實盤前三項風險量測（報價延遲／可借券／下單延遲） |
 | `LIVE_READINESS.md` | **上實盤前必讀**：已修掉的下單缺陷、三項風險實測數字、上櫃涵蓋率的解法與各資料源實測 |
 | `v13_factors.py` | 因子面板與 T-1 成交額產生器。每日開盤前 `--refresh`（向 finlab VIP 抓最新日 K → append → 重建因子）。<br>首次先 `--seed` 一次。見 `LIVE_READINESS.md` 第 7 節 |
@@ -96,7 +96,10 @@ python v13_export_model.py
 # 3. 今天模擬跑一遍（不下真單，now = 立即執行）
 python gap_fade_auto.py now
 
-# 4. 上實盤前
+# 4. 上實盤前：用真實帳戶跑一整天但零風險（會送真單，但價格不可能成交）
+python gap_fade_auto.py paper    # 交易日 08:55-13:40 之間執行
+
+# 5. 其他風險量測
 python v13_live_risk.py borrow     # 可借券覆蓋（已初步通過：各 gap 區間皆約 95%）
 python v13_live_risk.py quotes     # 08:58 執行，量測開盤報價可見延遲
 python v13_live_risk.py orders     # 盤中執行，量測 submit->ack 延遲與送單吞吐

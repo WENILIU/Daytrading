@@ -33,6 +33,9 @@ import comtypes.client
 SKCOM_PATH = r"D:\CapitalAPI\CapitalAPI_2.13.59_PythonExample\元件\x64\SKCOM.dll"
 comtypes.client.GetModule(SKCOM_PATH)
 import comtypes.gen.SKCOMLib as sk
+# Everything this script reads/writes lives next to the script itself, so moving the
+# folder does not silently break live or paper mode.
+_HERE = Path(__file__).resolve().parent
 
 
 # ============================================================
@@ -393,7 +396,7 @@ class Config:
     benchmark_no = "0050"           # opening-gap benchmark, observable at 09:00
 
     # ===== v13 MODEL (exported by v13_export_model.py) =====
-    model_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\v13_model.pkl")
+    model_path = _HERE / "v13_model.pkl"
     pred_q_min = 0.20               # skip bottom 20 pct of predicted PnL
     max_factor_lag_days = 10      # panel older than this -> feed NaN factors, like the backtest
 
@@ -445,8 +448,11 @@ class Config:
     # never binds on performance; it only bounds API load and order races on freak days
     # (up to 545 candidates in one day).
     max_orders_per_day = 30
+    # --- paper mode (see GapFadePaperTrader) ---
+    paper_poll_sec = 10         # simulated-fill resolution; 22 names batch in 0.47s
+    paper_probe_zhang = 1       # probe order size in ZHANG (nQty is zhang, not shares)
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
-    equity_state_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\equity_state.json")
+    equity_state_path = _HERE / "equity_state.json"
 
     # --- Cost ---
     cost_per_trade = 0.00109  # 0.2 pct x1.7 zhe + day-trade tax halved, per side
@@ -462,10 +468,10 @@ class Config:
     # --- Yahoo Finance (post-market reporting only) ---
     yahoo_batch_size = 50
     yahoo_max_workers = 15
-    stock_list_path = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\valid_stocks.txt")
+    stock_list_path = _HERE / "valid_stocks.txt"
 
     # --- Logging ---
-    log_dir = Path(r"C:\Users\weni.liu\Documents\Codex\2026-10-14\new-chat-3\outputs\trading_logs")
+    log_dir = _HERE / "trading_logs"
 
 
 # ============================================================
@@ -2735,6 +2741,218 @@ class GapFadeNowTrader(GapFadeSimulator):
         self._force_close_all_sim(None)
 
 
+
+class GapFadePaperTrader(GapFadeAutoTrader):
+    """Paper trading on the REAL Capital account - answers "can this run live?".
+
+    Capital's SKCOM has no simulated-order facility. Verified against the
+    installed type library (D:\\CapitalAPI\\CapitalAPI_2.13.59_PythonExample\\元件\\x64\\SKCOM.dll):
+    ISKOrderLib exposes 155 members and none of them is a paper / try order.
+    The second argument of SendStockStrategyDayTrade is bAsyncOrder, not a
+    simulation flag - see the official sample
+    PythonExampleV2/Order/TS/TSStrategyOrder/TSStrategyOrder.py:792. The only
+    sandbox is SKCenterLib_SetAuthority(2) = 測試環境, which is a different server
+    with a different account, so it cannot prove THIS account can trade.
+
+    Paper mode therefore keeps every real dependency and removes only the risk:
+
+      1. Real login, real quote feed, real scan / model / sizing - identical to live.
+      2. A real 智慧單 per signal, visible in the Capital App, but sized
+         paper_probe_zhang 張 at a price that cannot trade: LONG buys at 跌停,
+         SHORT sells at 漲停. If it somehow does fill, the 13:20 time-clear
+         flattens it, so the worst case is one 張 of one stock for a few hours.
+      3. The real ticket (full 張數, real SL/TP) is simulated internally against
+         the live quote feed at paper_poll_sec resolution, which yields the P&L,
+         win rate and entry-slippability numbers that decide live feasibility.
+    """
+
+    def run(self):
+        """Refuse to run outside the session: a night run would scan today's stale
+        opening prices, get every order rejected, and report a misleading verdict."""
+        now = datetime.now()
+        start = now.replace(hour=8, minute=55, second=0, microsecond=0)
+        stop = now.replace(hour=13, minute=40, second=0, microsecond=0)
+        if not (start <= now <= stop):
+            print("PAPER MODE needs the live session. Current time "
+                  f"{now:%H:%M:%S} is outside 08:55-13:40.")
+            print("Run it on a trading day before 09:00 (it waits for the open),")
+            print("or use `python gap_fade_auto.py scan` to test the feed only.")
+            return 0
+        return super().run()
+
+    def connect(self):
+        super().connect()
+        self.log.info("PAPER MODE - real orders at prices that cannot fill")
+        try:
+            nCode = self.m_pSKOrder.GetRealBalanceReport(self.user_id, self.account)
+            self.log.info(f"  GetRealBalanceReport -> "
+                          f"{self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)} "
+                          f"(the balance itself arrives on the Reply channel)")
+        except Exception as e:
+            self.log.warning(f"  GetRealBalanceReport failed: {e}")
+
+    def _probe_price(self, sig: Signal) -> float:
+        """A limit price that cannot trade: 跌停 for a buy, 漲停 for a sell."""
+        limit_up, limit_down = calc_price_limits(sig.prev_close)
+        return limit_down if sig.direction == Direction.LONG else limit_up
+
+    def _place_entry_order(self, sig: Signal):
+        """Send the risk-free probe order, keep the real ticket for simulation."""
+        real_entry, real_shares = sig.entry_price, sig.shares
+        sig._real_entry = real_entry
+        sig._real_shares = real_shares
+        sig._slip_measured = False
+
+        probe = self._probe_price(sig)
+        self.log.info(
+            f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "
+            f"@ {real_entry} SL={sig.sl_price} TP={sig.tp_price} "
+            f"-> sending {self.config.paper_probe_zhang} 張 @ {probe} (cannot fill)")
+        sig.entry_price = probe
+        sig.shares = self.config.paper_probe_zhang * 1000
+        super()._place_entry_order(sig)
+        # Restore the real ticket so _mark_exit prices the trade we WOULD have done.
+        sig.entry_price = real_entry
+        sig.shares = real_shares
+
+    def _measure_entry_slippage(self, prices: dict):
+        """First observable price vs the intended entry - the number the backtest
+        cannot know. Positive = worse than the backtest entry."""
+        for sym, price in prices.items():
+            sig = self.active_positions.get(sym)
+            if sig is None or getattr(sig, "_slip_measured", True):
+                continue
+            if not price or not getattr(sig, "_real_entry", 0):
+                continue
+            sig._slip_measured = True
+            raw = (price - sig._real_entry) / sig._real_entry
+            adverse = raw if sig.direction == Direction.LONG else -raw
+            self.exec_stats.setdefault("entry_slippage", []).append(
+                {"symbol": sym, "intended": sig._real_entry, "observed": price,
+                 "adverse_pct": adverse * 100})
+            self.log.info(f"  [PAPER] {sym} entry check: intended {sig._real_entry} "
+                          f"vs first price {price} -> adverse {adverse*100:+.2f}%")
+
+    def monitor_positions(self):
+        """Simulated fills driven by the real quote feed."""
+        from datetime import timedelta
+        self.log.info("=" * 60)
+        self.log.info("STEP 3: PAPER monitoring - real quotes, simulated fills")
+        poll = self.config.paper_poll_sec
+        force_dt = self._parse_time(self.config.force_exit_time)
+        end_dt = force_dt + timedelta(minutes=5)
+        first_poll = True
+
+        while self.running:
+            now = datetime.now()
+            if now >= end_dt:
+                self.log.info("  Session window over.")
+                break
+            open_sigs = [sig for sig in self.active_positions.values()
+                         if sig.state in (PositionState.FILLED, PositionState.MONITORING)]
+            if not open_sigs:
+                self.log.info("  All paper positions resolved.")
+                break
+
+            prices = self._fetch_prices([sig.symbol for sig in open_sigs])
+            if first_poll:
+                self._measure_entry_slippage(prices)
+                first_poll = False
+
+            force = now >= force_dt
+            for sig in open_sigs:
+                price = prices.get(sig.symbol)
+                if not price:
+                    continue
+                if force:
+                    self._mark_exit(sig, price, "FORCE_CLOSE")
+                    continue
+                if sig.direction == Direction.SHORT:
+                    hit_sl, hit_tp = price >= sig.sl_price, price <= sig.tp_price
+                else:
+                    hit_sl, hit_tp = price <= sig.sl_price, price >= sig.tp_price
+                # A poll that crosses both levels takes the stop: the intra-poll
+                # order is unknown, so assume the worse outcome.
+                if hit_sl:
+                    self._mark_exit(sig, price, "STOP_LOSS")
+                elif hit_tp:
+                    self._mark_exit(sig, price, "TAKE_PROFIT")
+            time.sleep(poll)
+
+    def daily_report(self):
+        super().daily_report()
+        self._paper_report()
+
+    def _paper_report(self):
+        import statistics as st
+        self.log.info("=" * 60)
+        self.log.info("LIVE FEASIBILITY REPORT (paper)")
+
+        acks = [o["ack_latency"] for o in self.exec_stats.get("orders", [])
+                if o.get("ack_latency")]
+        codes = [o.get("ack_code") for o in self.exec_stats.get("orders", [])]
+        rejected = [o for o in self.exec_stats.get("orders", []) if o.get("ack_code") != 0]
+        slips = [x["adverse_pct"] for x in self.exec_stats.get("entry_slippage", [])]
+        trades = self.closed_trades
+
+        def pct(v, q):
+            return st.quantiles(v, n=100)[min(99, int(q * 100) - 1)] if len(v) >= 20 else (max(v) if v else 0.0)
+
+        checks = []
+        self.log.info(f"  Orders sent: {len(codes)} | accepted: {len(codes)-len(rejected)} "
+                      f"| rejected: {len(rejected)}")
+        for o in rejected:
+            self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {o.get('msg','')[:120]}")
+        checks.append(("order acceptance 100%", not rejected and bool(codes)))
+
+        if acks:
+            self.log.info(f"  submit->ack: p50 {st.median(acks)*1000:.0f}ms "
+                          f"p90 {pct(acks,0.9)*1000:.0f}ms max {max(acks)*1000:.0f}ms")
+            checks.append(("ack p90 < 2000ms", pct(acks, 0.9) < 2.0))
+        else:
+            checks.append(("ack measured", False))
+
+        if slips:
+            adverse = [x for x in slips if x > 0]
+            self.log.info(f"  entry slippability: n={len(slips)} | adverse p50 "
+                          f"{st.median(slips):+.2f}% p90 {pct(slips,0.9):+.2f}% | "
+                          f"filled worse than intended: {len(adverse)}/{len(slips)}")
+            checks.append(("entry slippable (p90 < 0.5%)", pct(slips, 0.9) < 0.5))
+        else:
+            self.log.info("  entry slippability: not measured (no positions)")
+            checks.append(("entry slippable", False))
+
+        if trades:
+            pnls = [t.get("pnl", 0.0) for t in trades]
+            wins = sum(1 for x in pnls if x > 0)
+            self.log.info(f"  simulated book: {len(trades)} trades | win rate "
+                          f"{wins/len(trades)*100:.1f}% | total PnL {sum(pnls):+,.0f} "
+                          f"(cost included) | avg {st.mean(pnls):+,.0f}")
+            by_reason = {}
+            for t in trades:
+                by_reason[t.get("reason", "?")] = by_reason.get(t.get("reason", "?"), 0) + 1
+            self.log.info(f"  exit reasons: {by_reason}")
+        else:
+            self.log.info("  simulated book: no trades today")
+
+        ok = all(v for _, v in checks)
+        for name, passed in checks:
+            self.log.info(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+        self.log.info(f"  VERDICT: {'live-ready' if ok else 'NOT live-ready'}")
+
+        out = Path(self.config.log_dir) / f"paper_report_{datetime.now():%Y%m%d}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "date": datetime.now().isoformat(),
+            "orders": self.exec_stats.get("orders", []),
+            "entry_slippage": self.exec_stats.get("entry_slippage", []),
+            "trades": trades,
+            "checks": {k: bool(v) for k, v in checks},
+            "verdict": "live-ready" if ok else "not-live-ready",
+        }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        self.log.info(f"  wrote {out}")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -2750,6 +2968,13 @@ if __name__ == "__main__":
         print("SIMULATION MODE - Paper trading via Fugle (waits for 9:00/9:15)")
         print(f"  Capital: {config.capital:,.0f}")
         trader = GapFadeSimulator(config)
+    elif mode == "paper":
+        print("PAPER MODE - real Capital account, risk-free orders + simulated fills")
+        print(f"  Account: {config.cust_cert_id} | Capital: {config.capital:,.0f}")
+        print("  Orders ARE sent and visible in the Capital App, but 1 張 at a price")
+        print("  that cannot trade (跌停 for buys, 漲停 for sells). The real ticket is")
+        print("  simulated against the live quote feed. Capital has no paper-order API.")
+        trader = GapFadePaperTrader(config)
     elif mode == "scan":
         print("SCAN / RISK1 - full-market quote scan only, NO orders")
         print("  Polls until 09:01:00 and reports when opening prices actually")
