@@ -430,7 +430,7 @@ class Config:
     # trade at 1,000,000 TWD - uncapped it reaches 2,090,000 (47 pct of equity).
     # Measured: CAGR 155.4 pct / MDD -3.6 pct / Calmar 43.2, vs floor-only
     # 165.7 / -4.2 / 39.8. Lower CAGR, strictly better risk.
-    max_per_trade = 1_000_000
+    max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
     max_lot_value = 250_000
     # One order must not exceed this fraction of the name's T-1 turnover (0 = off).
     # Measured 2026-10-27 (v13_sizing_lab R9/R10): 10 pct costs 4 pp of CAGR
@@ -1685,7 +1685,7 @@ class GapFadeAutoTrader:
                               f"{self.config.max_lot_value:,.0f}, SKIP (lot too coarse)")
                 skipped_lot_coarse += 1
                 continue
-            target_value = min(pos_pct * budget, self.config.max_per_trade)
+            target_value = min(pos_pct * budget, self.config.max_per_trade_pct * budget)
             # Impact cap: one order must not exceed 10 pct of the name's T-1 turnover.
             # T's own turnover is unknown at 09:00, so T-1 is the only legal proxy.
             # Measured (v13_sizing_lab R9): costs 4 pp of CAGR over 19 years but the
