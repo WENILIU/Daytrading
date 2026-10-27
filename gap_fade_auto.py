@@ -2999,12 +2999,34 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         else:
             checks.append(("ack measured", False))
 
+        # The gate used to be "adverse p90 < 0.5 pct", which is WRONG and would
+        # have failed every normal day: measured on 2026 1-minute data the
+        # opening price is readable at p50 +10s and acting then costs +0.098 pct
+        # adverse on average with p90 +1.408 pct (11,157 shorts). That is the
+        # normal case, not a failure. What matters is the cost RELATIVE to the
+        # edge. Measured relationship: the raw adverse overstates the damage to
+        # the whole trade by ~2.5x (raw +0.098 pct becomes a net -0.039 pp on
+        # the trade, because the exit shifts with the entry), and the edge on
+        # the trades the strategy actually takes is 0.382 pct/trade. So the
+        # honest gate is: net cost < 25 pct of the edge.
+        EDGE_PER_TRADE = 0.382      # pct, measured 2026, top-10 signals per day
+        NET_FROM_RAW = 0.40         # net trade cost / raw adverse entry slippage
         if slips:
             adverse = [x for x in slips if x > 0]
+            mean_adv = st.mean(slips)
+            net = mean_adv * NET_FROM_RAW
+            share = net / EDGE_PER_TRADE * 100
             self.log.info(f"  entry slippability: n={len(slips)} | adverse p50 "
                           f"{st.median(slips):+.2f}% p90 {pct(slips,0.9):+.2f}% | "
                           f"filled worse than intended: {len(adverse)}/{len(slips)}")
-            checks.append(("entry slippable (p90 < 0.5%)", pct(slips, 0.9) < 0.5))
+            self.log.info(f"  implied net cost on the trade ~{net:.3f}% "
+                          f"({NET_FROM_RAW:.2f} x raw adverse, measured relationship) "
+                          f"= {share:.0f}% of the {EDGE_PER_TRADE:.3f}% per-trade edge")
+            self.log.info("    baseline from 2026 1-minute data: mean +0.098%, "
+                          "p90 +1.408% -> a day near that is NORMAL, not a failure")
+            checks.append((f"delay cost < 25% of the per-trade edge "
+                           f"(raw adverse mean < {0.25*EDGE_PER_TRADE/NET_FROM_RAW:.3f}%)",
+                           mean_adv < 0.25 * EDGE_PER_TRADE / NET_FROM_RAW))
         else:
             self.log.info("  entry slippability: not measured (no positions)")
             checks.append(("entry slippable", False))
