@@ -30,7 +30,7 @@ rule = {"name": "t", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": No
 PART = 5.0  # participation factor: min_turnover = PART * equity  ->  0.25/PART = 5% participation
 
 
-def run_year(eq_start, year, floor=None):
+def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_pct=0.0):
     min_tv = PART * eq_start
     if floor is not None:
         min_tv = max(floor, min_tv)
@@ -49,12 +49,18 @@ def run_year(eq_start, year, floor=None):
         zd = sub["zt_dist"].values
         zm = np.where(zd < BP1, M1, np.where(zd < BP2, M2, 1.0))
         p_pred = np.asarray(sub["pred"].values, dtype=float)
-        kM = np.where(np.isfinite(p_pred), np.clip(0.5 + np.nan_to_num(p_pred) / 0.02, 0, 2), 1.0)
+        if use_k_model:
+            kM = np.where(np.isfinite(p_pred), np.clip(0.5 + np.nan_to_num(p_pred) / 0.02, 0, 2), 1.0)
+        else:
+            kM = np.ones(len(p_pred))
         p30 = np.array([tr.get((dt, x), np.nan) for x in sub["direction"]], dtype=float)
         kT = np.where(np.isnan(p30), 1.0, np.clip(0.5 + p30 / 0.02, 0, 2.0))
         sp = (sub["direction"] == "SHORT").mean()
-        ds_val = 0.5 if sp > 0.8 or sp < 0.2 else 1.0
-        w = np.minimum(np.asarray(sub["base_pos"].values, dtype=float) * zm * ds_val * rs * kM * kT, MP)
+        ds_val = (0.5 if sp > 0.8 or sp < 0.2 else 1.0) if use_ds else 1.0
+        base = np.asarray(sub["base_pos"].values, dtype=float)
+        w = np.minimum(base * zm * ds_val * rs * kM * kT, MP)
+        if min_pos_pct > 0:
+            w = np.where(w >= min_pos_pct, w, 0.0)  # live: skip designs too small for 1 zhang
         o = np.argsort(-np.nan_to_num(p_pred, nan=-99))
         w = w[o]
         pn = np.asarray(sub["p"].values, dtype=float)[o]
@@ -80,7 +86,7 @@ def run_year(eq_start, year, floor=None):
     return eq_s.iloc[-1], yr_ret, yr_dd, shp, n_total, len(yd), min_tv
 
 
-def scenario_each_year(floor, label):
+def scenario_each_year(floor, label, use_k_model=True, use_ds=True, min_pos_pct=0.0):
     print("=" * 78)
     print(label)
     print("=" * 78)
@@ -88,7 +94,7 @@ def scenario_each_year(floor, label):
     print("-" * 72)
     tot = 0.0; rows = []
     for y in range(2014, 2027):
-        r = run_year(4_500_000, y, floor)
+        r = run_year(4_500_000, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
         final, ret, dd, shp, nt, nd, mtv = r
@@ -101,7 +107,7 @@ def scenario_each_year(floor, label):
     return rows
 
 
-def scenario_compound(floor, cap_eq, label):
+def scenario_compound(floor, cap_eq, label, use_k_model=True, use_ds=True, min_pos_pct=0.0):
     print()
     print("=" * 78)
     print(label)
@@ -110,7 +116,7 @@ def scenario_compound(floor, cap_eq, label):
     print("-" * 78)
     eq = 4_500_000; wd = 0
     for y in range(2014, 2027):
-        r = run_year(eq, y, floor)
+        r = run_year(eq, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
         final, ret, dd, shp, nt, nd, mtv = r
@@ -126,3 +132,8 @@ if __name__ == "__main__":
     scenario_each_year(None, "A) PURE DYNAMIC participation 5% from day one (minTV = 5 x equity, NO floor)")
     scenario_each_year(20_000_000, "B) WITH 2000wan floor (previous version)")
     scenario_compound(None, 20_000_000, "C) PURE DYNAMIC | compound then withdraw above 2000wan")
+
+    scenario_each_year(None, "D) LIVE-EXACT config (k_model OFF, direction-balance OFF, min_pos_pct 0.5 pct)",
+                     use_k_model=False, use_ds=False, min_pos_pct=0.005)
+    scenario_compound(None, 20_000_000, "E) LIVE-EXACT | compound then withdraw above 2000wan",
+                      use_k_model=False, use_ds=False, min_pos_pct=0.005)
