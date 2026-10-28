@@ -4563,6 +4563,8 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_curve_summary": _wait_curve_summary(
                 self.exec_stats.get("entry_curve") or {}),
             "day_trade_flags": self.exec_stats.get("day_trade_flags", {}),
+            "day_trade_rule": self.exec_stats.get("day_trade_rule", "not determined"),
+            "day_trade_preopen_codes": self.exec_stats.get("day_trade_preopen_codes", 0),
             "day_trade_coverage": self.exec_stats.get("day_trade_coverage", [0, 0]),
             "day_trade_wait_sec": self.exec_stats.get("day_trade_wait_s", 0),
             "day_trade_summary": {

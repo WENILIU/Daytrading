@@ -18,7 +18,8 @@ sys.path.insert(0, ".")
 from gap_fade_auto import (Config, GapFadeAutoTrader, get_borrowable_stocks,
                       pump_messages, parse_realtime_inventory,
                       summarize_daytrade_quota,
-                          _ensure_finlab_login, _from_finlab, DISPOSAL_PANEL)
+                          _ensure_finlab_login, _from_finlab, DISPOSAL_PANEL,
+                          FCD_PANEL, DAYTRADE_DEAD_LIST, DAYTRADE_DEAD_STALE_WARN_DAYS)
 
 cfg = Config()
 results = []
@@ -126,6 +127,41 @@ try:
         "PASS" if nb > 100 else "WARN")
 except Exception as e:
     add("borrowable / lending quota", False, f"{type(e).__name__}: {e}", "WARN")
+
+# 5b. the two panels that decide whether a name may be day traded at all.
+#     Neither one stops the run - the broker's nDayTrade gate covers full-cash-
+#     delivery too - but both degrade SILENTLY: an old panel still answers, it just
+#     stopped covering names that became untradeable this week. Measured cost of the
+#     layer (2026-10-28): full-cash-delivery -2.0 pct of 13-year PnL, the per-date
+#     zero-day-trade-volume rule -14.5 pct. See LIVE_READINESS.md 11.17.
+try:
+    import pickle as _pk
+    import pandas as _pd
+    today = _pd.Timestamp(date.today())
+    msgs = []
+    stale = 0
+    p = _pd.read_pickle(FCD_PANEL)
+    asof = p.index.max()
+    lag = (today - asof).days
+    stale += lag > DAYTRADE_DEAD_STALE_WARN_DAYS
+    msgs.append(f"full-cash-delivery panel ends {asof.date()} ({lag}d), "
+                f"{int(p.iloc[-1].sum())} names on its last day")
+    with open(DAYTRADE_DEAD_LIST, "rb") as fh:
+        blob = _pk.load(fh)
+    days = blob.get("days") or {}
+    dasof = blob.get("asof")
+    dlag = (today - _pd.Timestamp(dasof)).days
+    stale += dlag > DAYTRADE_DEAD_STALE_WARN_DAYS
+    newest = days[max(days)] if days else []
+    msgs.append(f"zero-day-trade-volume list as-of {dasof} ({dlag}d), "
+                f"{len(newest)} names, {blob.get('sessions')} sessions")
+    ok = not stale
+    add("day-trade executability panels", ok,
+        " | ".join(msgs) + ("" if ok else "  -> refresh with: python refresh_executability_panels.py"),
+        "PASS" if ok else "WARN")
+except Exception as e:
+    add("day-trade executability panels", False,
+        f"{type(e).__name__}: {e} - run python refresh_executability_panels.py", "WARN")
 
 # 6. the scan feed must answer for BOTH markets
 try:
