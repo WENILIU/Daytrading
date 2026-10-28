@@ -3024,6 +3024,12 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             t_fetch = time.time()
             prices = self._fetch_prices([sig.symbol for sig in open_sigs])
             fetch_sec = time.time() - t_fetch
+            # A session that began after 09:00 cannot know WHEN a level was
+            # crossed. Settling such a position at the observed price invents a
+            # fill that never happened, so it is settled at the level instead and
+            # tagged PRESTART to keep it out of any comparison with the backtest.
+            late_start = first_poll and (
+                time.time() - self.exec_stats.get("t_open", time.time())) > 60
             if first_poll:
                 self._measure_entry_slippage(prices)
                 first_poll = False
@@ -3063,9 +3069,15 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 # A poll that crosses both levels takes the stop: the intra-poll
                 # order is unknown, so assume the worse outcome.
                 if hit_sl:
-                    self._mark_exit(sig, price, "STOP_LOSS")
+                    if late_start:
+                        self._mark_exit(sig, sig.sl_price, "STOP_LOSS_PRESTART")
+                    else:
+                        self._mark_exit(sig, price, "STOP_LOSS")
                 elif hit_tp:
-                    self._mark_exit(sig, price, "TAKE_PROFIT")
+                    if late_start:
+                        self._mark_exit(sig, sig.tp_price, "TAKE_PROFIT_PRESTART")
+                    else:
+                        self._mark_exit(sig, price, "TAKE_PROFIT")
             time.sleep(poll)
 
     def daily_report(self):
@@ -3184,6 +3196,13 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             for t in trades:
                 by_reason[t.get("reason", "?")] = by_reason.get(t.get("reason", "?"), 0) + 1
             self.log.info(f"  exit reasons: {by_reason}")
+            prestart = [t for t in trades if t.get("reason", "").endswith("_PRESTART")]
+            if prestart:
+                self.log.warning(
+                    f"  {len(prestart)} of these were already through a level before "
+                    f"this process started observing. They are settled at the level "
+                    f"price and tagged _PRESTART - exclude them when comparing with "
+                    f"the backtest; a run started before 09:00 has none.")
         else:
             self.log.info("  simulated book: no trades today")
 
