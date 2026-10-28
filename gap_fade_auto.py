@@ -3214,9 +3214,15 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             # untagged while the report's own _PRESTART warning stayed silent.
             # The honest unit is "the first price ever seen for THIS position".
             late_session = (time.time() - self.exec_stats.get("t_open", time.time())) > 60
-            if first_poll:
-                self._measure_entry_slippage(prices)
-                first_poll = False
+            # Measure on EVERY poll, not only the first. _measure_entry_slippage
+            # marks each signal once (_slip_measured), so this still records
+            # exactly one reading per position - but now it records it at that
+            # position's first observable price even when that price arrives a
+            # poll late. Tied to first_poll, a name whose quote arrives late
+            # silently drops out of the slippage sample, and that is the one
+            # gate paper can measure without the day-trade qualification.
+            self._measure_entry_slippage(prices)
+            first_poll = False
 
             if time.time() >= next_beat:
                 next_beat = time.time() + heartbeat_sec
