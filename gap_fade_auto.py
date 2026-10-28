@@ -2945,9 +2945,32 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         sig.entry_price = real_entry
         sig.shares = real_shares
 
+        # Register the SIMULATED ticket no matter what the probe order did.
+        # The probe is priced so it can never fill, and the broker can also
+        # reject it outright - on 2026-10-28 every SHORT came back as
+        # error 924 "投資人未具有上市/上櫃股票當沖資格(無券當沖)". If registering
+        # depended on the probe being accepted, run() would log "No positions
+        # entered. Done." and skip the whole simulated session, so paper would
+        # produce zero feasibility data on exactly the days that most need
+        # explaining. The rejection is still counted honestly: the
+        # submit-acceptance gate reads exec_stats["orders"], which the parent
+        # already filled with ack_code / msg.
+        if sig.state == PositionState.CANCELLED:
+            rec = next((r for r in reversed(self.exec_stats.get("orders", []))
+                        if r["symbol"] == sig.symbol), None) or {}
+            self.log.info(f"  [PAPER] {sig.symbol} probe rejected "
+                          f"code={rec.get('ack_code')} {str(rec.get('msg',''))[:150]}")
+            self.log.info(f"  [PAPER] {sig.symbol} simulating the intended ticket "
+                          f"anyway; the rejection is counted as a submit failure")
+            sig.state = PositionState.FILLED
+        self.active_positions[sig.symbol] = sig
+
     def _measure_entry_slippage(self, prices: dict):
         """First observable price vs the intended entry - the number the backtest
         cannot know. Positive = worse than the backtest entry."""
+        # The timestamp is part of the measurement: a value taken minutes after
+        # the open describes a late start, not the live path.
+        t_obs = time.time()
         for sym, price in prices.items():
             sig = self.active_positions.get(sym)
             if sig is None or getattr(sig, "_slip_measured", True):
@@ -2959,7 +2982,8 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             adverse = raw if sig.direction == Direction.LONG else -raw
             self.exec_stats.setdefault("entry_slippage", []).append(
                 {"symbol": sym, "intended": sig._real_entry, "observed": price,
-                 "adverse_pct": adverse * 100})
+                 "adverse_pct": adverse * 100,
+                 "after_open_sec": t_obs - self.exec_stats.get("t_open", t_obs)})
             self.log.info(f"  [PAPER] {sym} entry check: intended {sig._real_entry} "
                           f"vs first price {price} -> adverse {adverse*100:+.2f}%")
 
@@ -3033,6 +3057,32 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                       f"| rejected: {len(rejected)}")
         for o in rejected:
             self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {o.get('msg','')[:120]}")
+        # Rejections that repeat with the SAME broker reason are an account
+        # qualification problem, not a per-order glitch. Name the fix instead of
+        # making the user diff 7 identical lines.
+        blockers = []
+        if rejected:
+            groups = {}
+            for o in rejected:
+                key = str(o.get("msg", ""))[:90].strip()
+                groups[key] = groups.get(key, 0) + 1
+            for key, n in sorted(groups.items(), key=lambda kv: -kv[1]):
+                if n < 2:
+                    continue
+                self.log.warning(f"  SYSTEMIC: {n}/{len(codes)} orders rejected for the "
+                                 f"same reason: {key}")
+                if "當沖資格" in key:
+                    side = "無券當沖(放空)" if any(
+                        o.get("direction") == "SHORT" for o in rejected) else "當沖"
+                    self.log.warning(
+                        f"    -> the account does not hold the broker's {side} "
+                        "qualification. This is granted by application and 上市 / "
+                        "上櫃 are approved separately, so one can work while the "
+                        "other does not. Until it is on, every affected signal is "
+                        "untradeable no matter what the model says.")
+                    blockers.append(f"broker qualification missing: {key}")
+                else:
+                    blockers.append(f"systemic order rejection x{n}: {key}")
         checks.append(("order acceptance 100%", not rejected and bool(codes)))
 
         if acks:
@@ -3054,7 +3104,21 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         # honest gate is: net cost < 25 pct of the edge.
         EDGE_PER_TRADE = 0.382      # pct, measured 2026, top-10 signals per day
         NET_FROM_RAW = 0.40         # net trade cost / raw adverse entry slippage
-        if slips:
+        delays = [x.get("after_open_sec") for x in self.exec_stats.get("entry_slippage", [])
+                  if x.get("after_open_sec") is not None]
+        late_start = bool(delays) and st.median(delays) > 60
+        if slips and late_start:
+            self.log.warning(
+                f"  entry slippability: NOT TESTED under live conditions. This "
+                f"process first read prices {st.median(delays):.0f}s after "
+                f"09:00:00, so the {len(slips)} readings below (mean adverse "
+                f"{st.mean(slips):+.2f}%) measure a late start, not the live path. "
+                f"Start before 09:00 to measure the real thing.")
+            checks.append(("entry slippable [NOT TESTED - started after the open]", False))
+            blockers.append(
+                f"slippage unmeasurable: first price read {st.median(delays):.0f}s "
+                f"after 09:00")
+        elif slips:
             adverse = [x for x in slips if x > 0]
             mean_adv = st.mean(slips)
             net = mean_adv * NET_FROM_RAW
@@ -3100,6 +3164,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
             "trades": trades,
             "checks": {k: bool(v) for k, v in checks},
+            "blockers": blockers,
             "verdict": "live-ready" if ok else "not-live-ready",
         }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         self.log.info(f"  wrote {out}")
@@ -3222,7 +3287,10 @@ if __name__ == "__main__":
         trader = GapFadeNowTrader(config)
     else:
         print(f"Unknown mode: {mode}")
-        print("Usage: python gap_fade_auto.py [live|sim|now|scan]")
+        print("Usage: python gap_fade_auto.py [live|paper|sim|scan|now]")
+        print("  paper = real Capital account, risk-free probe orders + simulated")
+        print("          fills; the mode that answers 'can this run live?'")
+        print("  scan  = full-market quote scan + RISK1 opening-print timing only")
         sys.exit(1)
 
     trader.run()
