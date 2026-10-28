@@ -606,6 +606,43 @@ def _in_trading_session(ts: float) -> bool:
     return (_dt.time(9, 0) <= t.time() <= _dt.time(13, 30)) and t.weekday() < 5
 
 
+def pump_messages(seconds: float = 0.0, poll: float = 0.05) -> int:
+    """Wait while dispatching whatever COM queued for this thread. Returns the
+    number of dispatched messages.
+
+    PROVEN 2026-10-28 14:29 with a control (_probe_pump.py): the SKCOM OrderLib
+    report events are delivered ONLY while the thread pumps messages.
+      A  request balance, wait 8s without pumping  -> 0 events
+      B  request balance, pump for 12s             -> 6 events
+      C  request smart report, pump for 10s        -> 7 events
+      D  control: request balance, wait 10s again  -> 0 events
+    Every "the broker never answered" conclusion drawn from a sleep-loop is
+    therefore really "we never dispatched the answer". This API has no fill
+    event - GetTSSmartStrategyReport -> OnTSSmartStrategyReport is the only way
+    to learn what a smart order did - so without a pump live would place orders
+    and stay blind to them for the whole session. That is also why
+    GetRealBalanceReport returned SK_SUCCESS six times on 2026-10-28 and
+    [BALANCE] never appeared in the log.
+    """
+    try:
+        import pythoncom
+    except Exception:
+        time.sleep(seconds)
+        return 0
+    dispatched = 0
+    deadline = time.time() + seconds
+    while True:
+        try:
+            while pythoncom.PumpWaitingMessages():
+                dispatched += 1
+        except Exception:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(poll)
+    return dispatched
+
+
 def _is_qual_rejection(order: dict) -> bool:
     """True when the broker refused because the ACCOUNT lacks a day-trade qualification.
 
@@ -1049,7 +1086,7 @@ class GapFadeAutoTrader:
 
         # Get trading account
         self.m_pSKOrder.GetUserAccount()
-        time.sleep(2)  # Wait for OnAccount callback
+        pump_messages(2)  # OnAccount is delivered only while pumping
 
         if not self.account:
             # Try to get account directly
@@ -2969,11 +3006,16 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 self.exec_stats["account_balance"] = reply["text"]
                 self.log.info(f"  account equity reply:\n{reply['text'][:1500]}")
             else:
-                self.log.warning("  no balance data within 6s. The reply host is connected "
-                                 f"(request returned {center_code}), so this is either a "
-                                 "session-hours restriction or a channel this host does not "
-                                 "use. Non-blocking: the three feasibility gates do not "
-                                 "depend on it.")
+                self.log.warning("  no balance data within 6s even though the "
+                                 f"request returned {center_code}. This API answers "
+                                 "asynchronously and the answer is dispatched only "
+                                 "while this thread pumps messages, so this means "
+                                 "pump_messages() is not working (pythoncom missing, "
+                                 "or the COM apartment changed) - not a session-hours "
+                                 "restriction, which is what this used to blame. "
+                                 "preflight.py check 'broker report events' tests the "
+                                 "same channel. Non-blocking for the three feasibility "
+                                 "gates, but without it live cannot see its own orders.")
         except Exception as e:
             self.log.warning(f"  GetRealBalanceReport failed: {e}")
 
@@ -2986,6 +3028,12 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         """
         deadline = time.time() + 6.0
         while time.time() < deadline:
+            if self._balance_reports:
+                b = self._balance_reports[0]
+                return {"ts": b["ts"], "text": b["text"]}
+            # The balance arrives on OnRealBalanceReport, and that event is only
+            # dispatched while this thread pumps (see pump_messages).
+            pump_messages(0.5)
             if self._balance_reports:
                 b = self._balance_reports[0]
                 return {"ts": b["ts"], "text": b["text"]}
@@ -3016,7 +3064,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                         return {"ts": d["ts"], "text": "\n".join(rows)}
                 if not keywords and d["row"]:
                     return {"ts": d["ts"], "text": d["row"]}
-            time.sleep(0.25)
+            pump_messages(0.25)
         return None
 
     def _send_canary(self):
@@ -3070,7 +3118,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                     for r in self._smart_reports[-3:]:
                         self.log.info(f"  [CANARY] smart report row: {r['row'][:400]}")
                     break
-                time.sleep(1)
+                pump_messages(1)
             else:
                 self.log.warning("  [CANARY] order accepted but no smart report "
                                  "row within 10s - the status channel is still "
@@ -3299,7 +3347,10 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                         self._mark_exit(sig, sig.tp_price, "TAKE_PROFIT_PRESTART")
                     else:
                         self._mark_exit(sig, price, "TAKE_PROFIT")
-            time.sleep(poll)
+            # The monitoring loop is where a live session would learn its own
+            # order state. Sleeping here instead of pumping is what kept the
+            # status channel dark for every session so far.
+            pump_messages(poll)
 
     def daily_report(self):
         super().daily_report()

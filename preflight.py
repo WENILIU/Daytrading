@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 from gap_fade_auto import (Config, GapFadeAutoTrader, get_borrowable_stocks,
+                      pump_messages,
                           _ensure_finlab_login, _from_finlab, DISPOSAL_PANEL)
 
 cfg = Config()
@@ -150,6 +151,42 @@ try:
         f"login={t._logged_in} account={t.account} order_lib={'OK' if t.m_pSKOrder else 'None'}")
 except Exception as e:
     add("Capital SKCOM", False, f"{type(e).__name__}: {e}")
+
+# 7b. a login is not enough - the broker's report events have to be delivered.
+#     This API has no fill event: GetTSSmartStrategyReport -> OnTSSmartStrategyReport
+#     is the only way to learn what a smart order did, and those events are
+#     dispatched ONLY while the thread pumps messages (proved 2026-10-28 14:29
+#     with a control: 8s without pumping = 0 events, 12s pumping = 6, another 10s
+#     without = 0). If this FAILs, the pump is broken and a session would place
+#     orders and stay blind to them - which is exactly how six
+#     "GetRealBalanceReport -> SK_SUCCESS" lines on 2026-10-28 produced no
+#     [BALANCE] row at all.
+try:
+    # Ask for a report here rather than relying on connect(): the balance request
+    # lives in GapFadePaperTrader.connect(), and preflight runs the base trader.
+    # What is being tested is the channel, not the mode.
+    before = len(getattr(t, "_balance_reports", []) or [])
+    rc = t.m_pSKOrder.GetRealBalanceReport(t.user_id, t.account)
+    rc_name = t.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(rc)
+    pump_messages(1.0)
+    rows = len(getattr(t, "_balance_reports", []) or []) - before
+    if not rows:
+        # One more round: the answer is asynchronous, and a single 1s window is
+        # the difference between "broken" and "slow".
+        pump_messages(4.0)
+        rows = len(getattr(t, "_balance_reports", []) or []) - before
+    add("broker report events", rows > 0,
+        (f"{rows} row(s) arrived through OnRealBalanceReport (request "
+         f"{rc_name}) - the message pump works, so smart-order "
+         "status can arrive too" if rows else
+         "the request returned but no event was dispatched within 5s. This API "
+         "has no fill event; GetTSSmartStrategyReport -> OnTSSmartStrategyReport "
+         "is the only way to see what an order did, and it needs the pump. "
+         "Check pump_messages() / pythoncom. Without this, live places orders "
+         "and stays blind to them all session."),
+        "PASS" if rows else "FAIL")
+except Exception as e:
+    add("broker report events", False, f"{type(e).__name__}: {e}")
 
 # 8. equity state: live has never traded, so this file must not exist
 try:
