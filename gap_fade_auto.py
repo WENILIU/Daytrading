@@ -665,6 +665,108 @@ def summarize_daytrade_quota(rows: list[dict]) -> dict:
             "sellable": sum(1 for r in rows if r["daytrade_sellable"] > 0)}
 
 
+# Status codes from the manual, section on OnTSSmartStrategyReport.
+SMART_STATUS = {32: "中台收單成功", 33: "中台收單失敗", 34: "洗價中", 36: "洗價失敗",
+                37: "洗價觸發", 38: "觸發下單", 39: "下單失敗", 40: "使用者刪單",
+                41: "全部成交"}
+SMART_ORDER_KIND = {"0": "現股", "1": "代資", "2": "代券", "8": "無券普賣"}
+SMART_PRICE_TYPE = {"0": "前日收盤價", "1": "漲停價", "2": "跌停價", "7": "使用者輸入價"}
+
+
+def parse_smart_strategy_report(row: str) -> dict:
+    """Decode one OnTSSmartStrategyReport row.
+
+    The manual (4-2-63 / OnTSSmartStrategyReport) documents 24 comma-separated
+    fields. The rows actually received have TWO FEWER in the middle: 單次委託量 and
+    委託價格下限 are not sent. Everything before and after them matches.
+    That was established, not assumed - 24 real rows from 2026-10-28 were read
+    back out of the log, and every field returned here was checked against a
+    value we know we sent:
+
+        field 9  商品代碼    = the symbol we ordered
+        field 10 買賣別     = S for a SHORT probe
+        field 11 委託種類別  = 8 無券普賣, exactly the attribute 924 refuses
+        field 13 價格類別    = 7 使用者輸入價, and we did send explicit prices
+        field 14 價格別     = 2 限價, and these are limit orders
+        field 16 下單時間    = the timestamp in our own log
+        then    價格上限    = 34.1, the probe price we passed
+                委託總數量   = 1, paper_probe_zhang
+                狀態        = 32 中台收單成功
+                成交數量    = empty, and none of them filled
+
+    So the tail is read at 1-based fields 17-22 (t[16]-t[21]), two positions
+    earlier than the manual numbers them. Because that is an inference from one
+    order shape,
+    every field is validated before it is returned: if the status token is not a
+    documented code, or a number does not parse, parsed is False and the reason
+    is in problems. A row that does not validate is logged raw, never guessed.
+
+    The fill signal is deliberately doubled - 狀態 41 (全部成交) or 成交數量 > 0 -
+    because which one fires first is not known, and missing a fill is the failure
+    that costs money.
+    """
+    out = {"raw": row, "parsed": False, "ignorable": False, "problems": []}
+    # The channel ends every report with a bare "##" (optionally padded with the
+    # remaining commas). It is a terminator, not a row: observed 6 times on
+    # 2026-10-28, once per report, always after the last real order. Counting it
+    # as undecodable would raise a false alarm every single session, so it is
+    # marked ignorable and skipped. Anything else that fails to parse still
+    # surfaces - being loud about unknown rows is the safe direction.
+    stripped = (row or "").strip()
+    if stripped == "" or stripped.replace(",", "") == "##":
+        out["ignorable"] = True
+        out["problems"] = ["report terminator, not an order"]
+        return out
+    t = (row or "").split(",")
+    if len(t) < 23:
+        out["problems"].append(f"{len(t)} fields, expected >= 23")
+        return out
+    # header check without pulling in re: id, market, date, exchange
+    if not (t[0].isdigit() and t[1] == "TS" and len(t[2]) == 8
+            and t[2].isdigit() and t[3] in ("TSE", "OTC")):
+        out["problems"].append("header does not look like a smart-order row")
+        return out
+
+    out.update({"order_id": t[0], "trading_date": t[2], "exchange": t[3],
+                "symbol": t[8], "side": t[9], "order_kind": t[10],
+                "price_type": t[12], "price_style": t[13], "order_time": t[15],
+                "updated_at": t[20], "message": t[21]})
+    out["order_kind_text"] = SMART_ORDER_KIND.get(t[10], t[10])
+    out["price_type_text"] = SMART_PRICE_TYPE.get(t[12], t[12])
+
+    try:
+        out["limit_price"] = float(t[16])
+    except ValueError:
+        out["problems"].append(f"limit_price {t[16]!r} is not a number")
+
+    try:
+        out["qty_zhang"] = int(float(t[17] or 0))
+    except ValueError:
+        out["problems"].append(f"qty {t[17]!r} is not a number")
+
+    try:
+        code = int(t[18])
+    except ValueError:
+        out["problems"].append(f"status {t[18]!r} is not a number")
+    else:
+        if code in SMART_STATUS:
+            out["status_code"] = code
+            out["status_text"] = SMART_STATUS[code]
+        else:
+            out["problems"].append(f"status {code} is not a documented code - "
+                                   "the row layout may have changed")
+
+    try:
+        out["filled_qty"] = int(float(t[19] or 0))
+    except ValueError:
+        out["problems"].append(f"filled_qty {t[19]!r} is not a number")
+
+    # A fill is a fill from either signal; do not pick one and hope.
+    out["filled"] = (out.get("status_code") == 41) or (out.get("filled_qty", 0) > 0)
+    out["parsed"] = not out["problems"]
+    return out
+
+
 def pump_messages(seconds: float = 0.0, poll: float = 0.05) -> int:
     """Wait while dispatching whatever COM queued for this thread. Returns the
     number of dispatched messages.
@@ -3198,8 +3300,10 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             self.request_smart_report()
             for _ in range(10):
                 if self._smart_reports:
-                    for r in self._smart_reports[-3:]:
-                        self.log.info(f"  [CANARY] smart report row: {r['row'][:400]}")
+                    # Decode rather than paste the raw row: the point of the
+                    # canary is to prove live can read its own order state, and a
+                    # row nobody can parse proves nothing.
+                    self._log_smart_status()
                     break
                 pump_messages(1)
             else:
@@ -3380,6 +3484,10 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 # report is the correct answer - what matters is that the channel
                 # is proven to deliver before anything is traded for real.
                 self.request_smart_report()
+                # Requesting is not enough - the rows are only worth anything if
+                # they are decoded and written down before the session ends.
+                pump_messages(3.0)
+                self._log_smart_status()
                 if (self.config.paper_canary and not self._canary_done
                         and not any(o.get("ack_code") == 0
                                     for o in self.exec_stats.get("orders", []))):
@@ -3438,6 +3546,57 @@ class GapFadePaperTrader(GapFadeAutoTrader):
     def daily_report(self):
         super().daily_report()
         self._paper_report()
+
+    def _smart_status_summary(self) -> dict:
+        """Decode every smart-order report received so far, newest state per order.
+
+        This has to happen DURING the session: bstrDate is ignored, so the broker
+        only answers for today (measured 2026-10-28 14:45 with the documented
+        YYYYMMDD format - all three variants returned today's rows). Anything not
+        captured by the close cannot be reconstructed afterwards.
+
+        Returns {"orders": {order_id: parsed}, "unparsed": [raw, ...]}.
+        """
+        latest, unparsed = {}, []
+        for r in getattr(self, "_smart_reports", []) or []:
+            d = parse_smart_strategy_report(r.get("row", ""))
+            if not d["parsed"]:
+                if d.get("raw") and not d.get("ignorable"):
+                    unparsed.append(d["raw"])
+                continue
+            latest[d["order_id"]] = d
+        return {"orders": latest, "unparsed": unparsed}
+
+    def _log_smart_status(self):
+        s = self._smart_status_summary()
+        orders = s["orders"]
+        if not orders and not s["unparsed"]:
+            self.log.info("  [SMART STATUS] no smart-order report received")
+            return s
+        by_status = {}
+        for d in orders.values():
+            by_status[d.get("status_code")] = by_status.get(d.get("status_code"), 0) + 1
+        self.log.info(f"  [SMART STATUS] {len(orders)} order(s) reported | "
+                      f"by status: " + ", ".join(
+                          f"{k} {SMART_STATUS.get(k, '?')} x{v}" for k, v in sorted(
+                              (x for x in by_status.items() if x[0] is not None),
+                              key=lambda kv: str(kv[0])))
+                      + (f" | {len(s['unparsed'])} row(s) could not be decoded"
+                         if s["unparsed"] else ""))
+        for d in orders.values():
+            self.log.info(
+                f"    {d['symbol']} {d['side']} {d['order_kind_text']} "
+                f"price={d.get('limit_price')} qty={d.get('qty_zhang')}張 "
+                f"→ {d.get('status_code')} {d.get('status_text')} "
+                f"filled={d.get('filled_qty')} (order {d['order_id']}, "
+                f"{d.get('exchange')})")
+        filled = [d for d in orders.values() if d.get("filled")]
+        if filled:
+            self.log.warning(
+                f"    the broker reports {len(filled)} order(s) FILLED. In paper "
+                f"mode the probes are priced not to fill - if this is a probe, "
+                f"the zero-risk assumption is wrong and the position is real.")
+        return s
 
     def _paper_report(self):
         import statistics as st
@@ -3648,6 +3807,19 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             checks.append(("canary: an accepted order produced a smart-report row",
                            bool(acc) and rows > 0))
 
+        # The status channel is the thing live needs most and has never shown:
+        # what an order actually did. Receiving a row is not enough - it has to
+        # decode, because the row layout differs from the manual by two fields.
+        smart = self._log_smart_status()
+        if smart["orders"] or smart["unparsed"]:
+            bad = len(smart["unparsed"])
+            self.log.info(f"  smart-order status: {len(smart['orders'])} decoded, "
+                          f"{bad} not decoded")
+            checks.append(("smart-order rows decode", bad == 0 and bool(smart["orders"])))
+            if bad:
+                blockers.append(f"{bad} smart-order row(s) could not be decoded - "
+                                "the row layout may have changed since 2026-10-28")
+
         # The gate used to be "adverse p90 < 0.5 pct", which is WRONG and would
         # have failed every normal day: measured on 2026 1-minute data the
         # opening price is readable at p50 +10s and acting then costs +0.098 pct
@@ -3756,6 +3928,16 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
             "trades": trades,
             "checks": {k: bool(v) for k, v in checks},
+            "smart_order_status": [
+                {"order_id": d["order_id"], "symbol": d["symbol"],
+                 "side": d["side"], "order_kind": d.get("order_kind_text"),
+                 "limit_price": d.get("limit_price"), "qty_zhang": d.get("qty_zhang"),
+                 "status_code": d.get("status_code"),
+                 "status_text": d.get("status_text"),
+                 "filled_qty": d.get("filled_qty"), "filled": d.get("filled")}
+                for d in sorted(smart["orders"].values(),
+                                key=lambda x: x["order_id"])],
+            "smart_order_rows_undecoded": len(smart["unparsed"]),
             "blockers": blockers + account_blockers,
             "blockers_technical": blockers,
             "unmeasurable_via_account": unmeasurable,

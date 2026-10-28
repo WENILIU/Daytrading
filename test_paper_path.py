@@ -41,6 +41,10 @@ SUITES = [
     ("_test_inventory_parse.py",
      "the day-trade quota reading uses the manual's 19-field layout, not the SDK "
      "struct's 18 (off by one from index 15), and no rows is not read as no quota"),
+    ("_test_smart_report.py",
+     "a smart-order row is only reported when every field validates against what we "
+     "sent (the real 2026-10-28 rows), a fill is caught from either signal, and the "
+     "## terminator is ignored instead of raising a false alarm"),
 ]
 
 

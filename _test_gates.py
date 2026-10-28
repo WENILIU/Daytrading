@@ -17,6 +17,16 @@ warnings.filterwarnings("ignore")
 sys.path.insert(0, ".")
 import gap_fade_auto as G
 
+# A real OnTSSmartStrategyReport row from 2026-10-28. The fixture used to pass
+# the literal string "x" as a smart-report row, which the decoder correctly
+# refused - and that refusal then showed up as a technical blocker, which is the
+# right behaviour for a row that cannot be read. Using the real row makes the
+# cases below exercise the decode path instead of fighting it.
+SMART_ROW = ("27478651,TS,20261028,TSE,913R,0438724,0000000,11,6108,S,8,0,7,2,0,"
+             "2026-10-28 13:37:42.000,34.1,1,32,,2026-10-28 13:37:42,"
+             "[27478651][6108]msg,,,,0,0,,20,1,0,33.45,1,0,0,1,0,25.7,1,0,0,1,"
+             "2026-10-29 13:20:00.000,1,0,0,0,0001-01-01 08:00:00.000,,[in], [out],")
+
 
 def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0,
           qual_first=None):
@@ -28,7 +38,7 @@ def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0,
     lg.setLevel(logging.INFO)
     t.log = lg
     t.closed_trades = []
-    t._smart_reports = [{"ts": 0.0, "row": "x"}] * smart_rows
+    t._smart_reports = [{"ts": 0.0, "row": SMART_ROW}] * smart_rows
     t.exec_stats = {"orders": [], "entry_slippage": []}
     ts = dt.datetime(*dt.date.today().timetuple()[:3], *at).timestamp()
 
@@ -118,6 +128,10 @@ check("E the canary check passes on its own merits (order accepted + row receive
       str(gate(e, "canary")))
 check("E the 924 qualification blocker is still named",
       any("當沖資格" in x or "qualification" in x for x in e["blockers"]), str(e["blockers"]))
+check("E a real status row decodes, so no fake technical blocker appears",
+      e["smart_order_rows_undecoded"] == 0 and len(e["smart_order_status"]) == 1
+      and e["smart_order_status"][0]["status_text"] == "中台收單成功",
+      str(e.get("smart_order_status")))
 
 print("F) 25 strategy orders all rejected 924, in session, no canary")
 f = build(25, ack_code=924, at=(9, 0, 12))

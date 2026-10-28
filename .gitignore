@@ -4,6 +4,8 @@ _*
 # ...but _test_*.py are assertions, not scratch: test_paper_path.py runs them,
 # and a clone without them reports [MISSING].
 !_test_*.py
+# ...and _verify_*.py are end-to-end checks that exit 0/1 with a VERDICT (same category as the tests, not scratch): _verify_status_channel.py is the only thing that proves a live session can read its own smart-order state.
+!_verify_*.py
 # runtime output
 trading_logs/
 equity_state.json
