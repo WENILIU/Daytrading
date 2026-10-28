@@ -2122,6 +2122,14 @@ class GapFadeAutoTrader:
             lat_s = sorted(lat)
             self.log.info(f"  submit->ack  n={len(lat)} median={lat_s[len(lat_s)//2]*1000:.0f}ms "
                           f"p95={lat_s[int(len(lat_s)*0.95)]*1000:.0f}ms max={max(lat)*1000:.0f}ms")
+            # An ack for a rejected order is not the same measurement as an ack
+            # for an accepted one: the rejected path never reaches the exchange.
+            acc = [r["ack_latency"] for r in st.get("orders", [])
+                   if r.get("ack_code") == 0 and r.get("ack_latency")]
+            rej = [r["ack_latency"] for r in st.get("orders", [])
+                   if r.get("ack_code") not in (0, None) and r.get("ack_latency")]
+            self.log.info(f"    split: accepted={len(acc)} rejected={len(rej)} - "
+                          f"only the accepted ones say anything about live latency")
         if st.get("t_submit_first") and st.get("t_submit_last"):
             n = len(st.get("orders", []))
             span = st["t_submit_last"] - st["t_submit_first"]
