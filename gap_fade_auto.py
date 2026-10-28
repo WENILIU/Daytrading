@@ -2275,7 +2275,7 @@ class GapFadeAutoTrader:
                "price": sig.entry_price, "sl": sig.sl_price, "tp": sig.tp_price,
                "pos_pct": round(getattr(sig, "_pos_pct", 0.0), 4),
                "retries": 0, "ack_latency": None, "ack_code": None, "msg": "",
-               "submit_ts": None}
+               "submit_ts": None, "canary": bool(getattr(sig, "_canary", False))}
         self.exec_stats.setdefault("orders", []).append(rec)
         self.exec_stats["t_submit_first"] = min(self.exec_stats.get("t_submit_first", time.time()), time.time())
         try:
@@ -3029,6 +3029,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         self.log.info(f"  [CANARY] nothing was accepted today; sending 1 張 "
                       f"{sig.symbol} 現股買 @ {probe} (cannot fill) purely to "
                       f"prove the accepted-order + smart-report path")
+        sig._canary = True
         try:
             self._place_entry_order(sig)
         finally:
@@ -3265,13 +3266,22 @@ class GapFadePaperTrader(GapFadeAutoTrader):
 
     def _paper_report(self):
         import statistics as st
+        # pct() below falls back to max() under 20 samples, so a p90 gate cannot
+        # be called before that many orders exist.
+        MIN_ACK_SAMPLES = 20
         self.log.info("=" * 60)
         self.log.info("LIVE FEASIBILITY REPORT (paper)")
 
-        acks = [o["ack_latency"] for o in self.exec_stats.get("orders", [])
-                if o.get("ack_latency")]
-        codes = [o.get("ack_code") for o in self.exec_stats.get("orders", [])]
-        rejected = [o for o in self.exec_stats.get("orders", []) if o.get("ack_code") != 0]
+        # The canary is 1 張 現股買 sent only to exercise the accepted-order and
+        # smart-report path. It is not a strategy order, and a 現股買 clears the
+        # 無券當沖 wall that the strategy's SHORT orders hit, so letting it into
+        # the acceptance gate can turn "nothing tradeable" into "100% accepted".
+        all_orders = self.exec_stats.get("orders", [])
+        canaries = [o for o in all_orders if o.get("canary")]
+        orders = [o for o in all_orders if not o.get("canary")]
+        acks = [o["ack_latency"] for o in orders if o.get("ack_latency")]
+        codes = [o.get("ack_code") for o in orders]
+        rejected = [o for o in orders if o.get("ack_code") != 0]
         slips = [x["adverse_pct"] for x in self.exec_stats.get("entry_slippage", [])]
         trades = self.closed_trades
 
@@ -3279,8 +3289,10 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             return st.quantiles(v, n=100)[min(99, int(q * 100) - 1)] if len(v) >= 20 else (max(v) if v else 0.0)
 
         checks = []
-        self.log.info(f"  Orders sent: {len(codes)} | accepted: {len(codes)-len(rejected)} "
-                      f"| rejected: {len(rejected)}")
+        self.log.info(f"  Strategy orders: {len(codes)} | accepted: "
+                      f"{len(codes)-len(rejected)} | rejected: {len(rejected)}"
+                      + (f"  (plus {len(canaries)} canary, reported separately)"
+                         if canaries else ""))
         for o in rejected:
             why = str(o.get("broker_msg") or o.get("msg", ""))
             self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {why[:120]}")
@@ -3314,12 +3326,18 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         # message (measured 2026-10-28 13:37, after the close). The broker does
         # not check the day-trade qualification then, so treating that as a pass
         # would turn "we never asked the market" into "the account works".
-        subs = [o.get("submit_ts") for o in self.exec_stats.get("orders", [])
-                if o.get("submit_ts")]
+        subs = [o.get("submit_ts") for o in orders if o.get("submit_ts")]
         off_hours = [t for t in subs if not _in_trading_session(t)]
 
         if not codes:
-            checks.append(("order acceptance 100%", False))
+            extra = (f" (only the {len(canaries)} canary probe)" if canaries else "")
+            self.log.warning(
+                f"  order acceptance: NOT TESTED. No strategy order was sent"
+                f"{extra}. A canary is a 現股買: it clears the 無券當沖 wall the "
+                f"strategy's SHORT entries hit, so it cannot say the strategy is "
+                f"acceptable.")
+            checks.append(("order acceptance [NOT TESTED - no strategy order sent]", False))
+            blockers.append("no strategy order sent - acceptance unmeasured")
         elif off_hours:
             when = datetime.fromtimestamp(min(off_hours)).strftime("%H:%M:%S")
             self.log.warning(
@@ -3343,12 +3361,37 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             self.log.info(f"    (after-hours ack: p50 {st.median(acks)*1000:.0f}ms "
                           f"max {max(acks)*1000:.0f}ms)")
             checks.append(("ack latency [NOT TESTED - sent outside market hours]", False))
+        elif acks and len(acks) < MIN_ACK_SAMPLES:
+            # pct() falls back to max() below 20 samples, so with n=6 the "p90"
+            # printed here IS the maximum. On 2026-10-28 that made a PASS out of
+            # six orders. Report the numbers, but do not call it a pass.
+            self.log.warning(
+                f"  submit->ack: NOT TESTED. n={len(acks)} is below the "
+                f"{MIN_ACK_SAMPLES} orders this gate is sized for; with n={len(acks)} "
+                f"the p90 estimate IS the maximum, so passing would be luck.")
+            self.log.info(f"    (n={len(acks)}: p50 {st.median(acks)*1000:.0f}ms "
+                          f"max {max(acks)*1000:.0f}ms, reference only)")
+            checks.append((f"ack p90 < 2000ms [NOT TESTED - n={len(acks)} < "
+                           f"{MIN_ACK_SAMPLES}]", False))
         elif acks:
             self.log.info(f"  submit->ack: p50 {st.median(acks)*1000:.0f}ms "
                           f"p90 {pct(acks,0.9)*1000:.0f}ms max {max(acks)*1000:.0f}ms")
             checks.append(("ack p90 < 2000ms", pct(acks, 0.9) < 2.0))
         else:
             checks.append(("ack measured", False))
+
+        if canaries:
+            acc = [o for o in canaries if o.get("ack_code") == 0]
+            rows = len(getattr(self, "_smart_reports", []) or [])
+            self.log.info(f"  canary: {len(canaries)} sent | {len(acc)} accepted | "
+                          f"{rows} smart-report row(s) received")
+            if acc and not rows:
+                self.log.warning(
+                    "    the order was accepted but the broker sent no status. "
+                    "This is the channel live needs to see its own smart orders "
+                    "(fill price, whether SL/TP fired). Still unproven.")
+            checks.append(("canary: an accepted order produced a smart-report row",
+                           bool(acc) and rows > 0))
 
         # The gate used to be "adverse p90 < 0.5 pct", which is WRONG and would
         # have failed every normal day: measured on 2026 1-minute data the
