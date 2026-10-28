@@ -606,6 +606,65 @@ def _in_trading_session(ts: float) -> bool:
     return (_dt.time(9, 0) <= t.time() <= _dt.time(13, 30)) and t.weekday() < 5
 
 
+def parse_realtime_inventory(text: str) -> list[dict]:
+    """Parse the rows of OnRealBalanceReport.
+
+    This is NOT the account cash balance. The manual (4-2-c, in the SDK at
+    D:\\CapitalAPI\\...\\策略王COM元件使用說明_V2.13.59.docx) calls it
+    證券即時庫存 and lists 19 comma-separated fields:
+
+        0 股票代號          1 庫存種類(T集保/C融資/L融券)  2 資額度(原始)
+        3 資額度(可用)      4 券額度(原始)                5 券額度(可用)
+        6 昨日庫存          7 今日委買                    8 今日委賣
+        9 今日買進成交      10 今日賣出成交               11 可回補/集保可賣出
+        12 可資沖股數       13 可券沖股數                 14 即時庫存
+        15 (忽略)           16 即時個股維持率             17 LOGIN_ID
+        18 ACCOUNT_NO
+
+    Two traps worth writing down:
+      * the SDK's own SKDLLPython.py RealBalanceReport struct has 18 fields and
+        omits the "此欄請忽略" column, so from index 15 on it is off by one.
+        The manual is the one that matches the rows actually received.
+      * v2.13.42~v2.13.54 returned 可資沖 / 可券沖 SWAPPED (fixed in v2.13.55).
+        The installed SDK is 2.13.59, so the order above is correct - but an
+        upgrade/downgrade silently inverts a buy and a sell.
+
+    可資沖股數 / 可券沖股數 are the per-stock day-trade quotas. They are the
+    actionable answer to "can this account day-trade at all", which §11.3 of
+    LIVE_READINESS.md used to claim no API could give.
+    """
+    rows = []
+    for record in (text or "").split("#"):
+        tokens = record.split(",")
+        if len(tokens) < 19:
+            continue
+        code = tokens[0].strip()
+        if not code or not code.isdigit():
+            continue
+
+        def num(i):
+            try:
+                return int(float(tokens[i] or 0))
+            except ValueError:
+                return 0
+        rows.append({"symbol": code, "inventory_type": tokens[1].strip(),
+                     "yesterday_inventory": num(6), "sellable": num(11),
+                     "daytrade_buyable": num(12), "daytrade_sellable": num(13),
+                     "inventory": num(14)})
+    return rows
+
+
+def summarize_daytrade_quota(rows: list[dict]) -> dict:
+    """What the inventory rows say about day-trading. None means "cannot tell",
+    which is different from zero: an account with no holdings returns no rows,
+    and that must not be read as 'no quota'."""
+    if not rows:
+        return {"known": False, "rows": 0, "buyable": 0, "sellable": 0}
+    return {"known": True, "rows": len(rows),
+            "buyable": sum(1 for r in rows if r["daytrade_buyable"] > 0),
+            "sellable": sum(1 for r in rows if r["daytrade_sellable"] > 0)}
+
+
 def pump_messages(seconds: float = 0.0, poll: float = 0.05) -> int:
     """Wait while dispatching whatever COM queued for this thread. Returns the
     number of dispatched messages.
@@ -3003,8 +3062,32 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                           f"{self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)}")
             reply = self._wait_for_timeout_free_balance()
             if reply:
-                self.exec_stats["account_balance"] = reply["text"]
-                self.log.info(f"  account equity reply:\n{reply['text'][:1500]}")
+                # It used to be stored as "account_balance" and logged as
+                # "account equity". It is neither: this report is per-stock
+                # 即時庫存 (manual 4-2-c). The first row is a stock code, not a
+                # number of dollars.
+                self.exec_stats["realtime_inventory_report"] = reply["text"]
+                rows = parse_realtime_inventory(reply["text"])
+                q = summarize_daytrade_quota(rows)
+                self.exec_stats["daytrade_quota"] = q
+                self.log.info(f"  realtime inventory: {len(rows)} stock row(s) "
+                              f"received (this report is per-stock inventory, "
+                              f"not account equity)")
+                if not q["known"]:
+                    self.log.info("    no day-trade quota signal: the account "
+                                  "returned no inventory rows, which says nothing "
+                                  "about the qualification")
+                elif q["buyable"] == 0 and q["sellable"] == 0:
+                    self.log.warning(
+                        f"    ACCOUNT: 可資沖 and 可券沖 are 0 on all {q['rows']} "
+                        f"stock(s) the account reports. The broker is telling us, "
+                        f"before any order is sent, that this account cannot "
+                        f"day-trade. Apply for the qualification (上市 / 上櫃 "
+                        f"separately) - every signal will be rejected until then.")
+                else:
+                    self.log.info(f"    day-trade quota present on "
+                                  f"{q['buyable']} stock(s) buyable / "
+                                  f"{q['sellable']} sellable")
             else:
                 self.log.warning("  no balance data within 6s even though the "
                                  f"request returned {center_code}. This API answers "

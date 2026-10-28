@@ -16,7 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 from gap_fade_auto import (Config, GapFadeAutoTrader, get_borrowable_stocks,
-                      pump_messages,
+                      pump_messages, parse_realtime_inventory,
+                      summarize_daytrade_quota,
                           _ensure_finlab_login, _from_finlab, DISPOSAL_PANEL)
 
 cfg = Config()
@@ -187,6 +188,34 @@ try:
         "PASS" if rows else "FAIL")
 except Exception as e:
     add("broker report events", False, f"{type(e).__name__}: {e}")
+
+# 7c. what that report says about day-trading. The rows are per-stock 即時庫存
+#     and carry 可資沖股數 / 可券沖股數 - the broker's own answer, per stock, on
+#     whether this account may day-trade at all. Reading it here names the
+#     qualification problem at 08:58 instead of after 25 orders come back as 924.
+#     WARN, not FAIL: with no quota a session still measures entry slippage and
+#     the canary status channel, so refusing to start would throw evidence away.
+try:
+    rows = parse_realtime_inventory("\n".join(
+        r["text"] for r in getattr(t, "_balance_reports", []) or []))
+    q = summarize_daytrade_quota(rows)
+    if not q["known"]:
+        add("day-trade quota (可資沖/可券沖)", False,
+            "the account returned no inventory rows - that says nothing about the "
+            "qualification, so no claim is made", "WARN")
+    elif q["buyable"] == 0 and q["sellable"] == 0:
+        add("day-trade quota (可資沖/可券沖)", False,
+            f"0 on all {q['rows']} reported stock(s). The broker says, before any "
+            "order is sent, that this account cannot day-trade - so acceptance and "
+            "ack latency will be NOT TESTED again today. Apply with the broker "
+            "(上市 / 上櫃 separately). Slippage and the canary status channel are "
+            "still worth measuring, so the run is not blocked.", "WARN")
+    else:
+        add("day-trade quota (可資沖/可券沖)", True,
+            f"present on {q['buyable']} buyable / {q['sellable']} sellable of "
+            f"{q['rows']} reported stock(s)")
+except Exception as e:
+    add("day-trade quota (可資沖/可券沖)", False, f"{type(e).__name__}: {e}", "WARN")
 
 # 8. equity state: live has never traded, so this file must not exist
 try:

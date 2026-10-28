@@ -9,3 +9,6 @@ trading_logs/
 equity_state.json
 signal_history.json
 trail30_state.json
+
+# generated from the Capital SDK docx (see LIVE_READINESS.md 11.12 for the path)
+_capital_manual.txt

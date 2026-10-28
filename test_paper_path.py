@@ -38,6 +38,9 @@ SUITES = [
     ("_test_t1_panel_age.py",
      "the factor panel is judged against the previous SESSION, not calendar days "
      "(a Monday would have failed a correct Friday panel)"),
+    ("_test_inventory_parse.py",
+     "the day-trade quota reading uses the manual's 19-field layout, not the SDK "
+     "struct's 18 (off by one from index 15), and no rows is not read as no quota"),
 ]
 
 
