@@ -1377,3 +1377,55 @@ JSON 我沒有改——那是當天程式實際產出的證據，保留原樣，
 `_test_prestart_per_symbol.py` 現在 6 項斷言：除了結算標記，也驗證
 「第一次輪詢沒拿到價格、第二次才有」的情況下滑價**仍然被量到**，
 以及正常情況下**只量一次**不會重複。
+
+### 11.10 924 會讓判定**永遠**是 not-live-ready——把「帳戶資格」與「技術可行性」拆成兩軸（2026-10-28 盤後修）
+
+**發現它的地方不是市場，是邏輯**：今天的報告把 924 算進送單接受率，所以印出
+`order acceptance 100%: false`。這句話同時可以指兩件完全不同的事——
+「整合的程式壞了」和「帳戶沒開當沖資格」。後者是申請就好的**帳戶設定**，
+任何程式改動都不會讓它變綠。也就是说：只要資格還沒下來，這份報告
+**永遠**不能說「技術面準備好了」，而你看報告也分不出來是哪一半壞。
+
+更關鍵的一層（這是拆軸之後才看得見的）：
+**三道閘門裡有兩道需要「被接受的單」才有樣本。**
+
+| 閘門 | 沒有資格時能不能量 | 為什麼 |
+|---|---|---|
+| 送單接受率 | ✗ | 全部被 924 拒，接受路徑根本沒跑過 |
+| accept 路徑 ack 延遲 | ✗ | 被拒的單不走送交易所那條路，它的延遲是另一回事（見 §11.8） |
+| 開盤滑價 | ✓ | 靠即時報價量，不需要成交 |
+
+所以**沒申請資格，判定最多只能過一道**，而且那一道跟「能不能實盤下單」無關。
+這才是 §11.2 那條硬阻斷的完整代價：不只是失去 90.6% 的獲利，
+而是**連驗證其他兩道的能力都沒有**。
+
+**修法**（`gap_fade_auto.py`）：
+- `_is_qual_rejection()` 辨認 924（`broker_msg` 含「當沖資格」或 `ack_code == 924`）。
+- 接受率的分母改成**帳戶允許嘗試的單**（`eligible`）。全部被 924 拒時是
+  `NOT TESTED - account qualification blocked every order`，不是 `100%: false`。
+- 新增獨立的帳戶軸檢查：`account: day-trade qualification held`，
+  並直接寫出動作（向群益申請，上市/上櫃分開核准）。
+- 新增第三種狀態 `unmeasurable_via_account`：**因為帳戶而量不到的技術閘門**，
+  它的 check 仍然是 NOT TESTED（所以判定不會變寬），但**不再被當成技術面缺失**。
+- 報告新增 `blocking_axis` / `blockers_account` / `blockers_technical` /
+  `unmeasurable_via_account`，收盤那行會分開印 `account readiness` 與
+  `technical readiness`。
+
+**用今天的證據重算**（`_reclass_1028.py`，不碰市場、不下單，只把存下來的事件重放）：
+
+| | 舊報告（13:25 那版程式） | 新邏輯 |
+|---|---|---|
+| 接受率 | `order acceptance 100%: false`（語意不明） | `NOT TESTED - account qualification blocked every order` |
+| 帳戶 | 沒有這一項 | `account: day-trade qualification held: false` |
+| ack | `ack p90 < 2000ms: **true**`（假性通過，§11.8） | `NOT TESTED - no accepted order to time` |
+| 滑價 | `NOT TESTED - started after the open` | 同（這條本來就誠實） |
+| 判定 | `not-live-ready`（看不出原因） | `blocking axis: account + technical` |
+
+拆完之後今天的真相是：**技術面只剩一個真正屬於我們的缺失——晚啟動 2228 秒
+（09:37 才開始）導致開盤滑價量不到**，這個明天由 08:55 那條準時啟動的鏈直接消掉；
+**帳戶面只剩一件事：申請資格**。兩件事不再互相遮蓋。
+
+**驗證**：`_test_gates.py` 從 15 項增加到 **22 項**，新增情境 H（5 張被 924 拒 +
+20 張被接受，盤中）：接受率只量那 20 張並給真的 PASS、帳戶軸仍然 FAIL、
+ack 只量被接受的路徑。E/F/G 的斷言同步改成新語意（全 924 時必須是 NOT TESTED，
+且不得憑空產生技術缺失）。`test_paper_path.py` **7/7**。

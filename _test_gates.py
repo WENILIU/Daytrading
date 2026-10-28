@@ -5,8 +5,11 @@
   C) no strategy order, only an accepted canary -> acceptance NOT TESTED, canary
      check present and FAILING (no smart-report row)
   D) 25 strategy orders in session          -> both gates real
-  E) 25 strategy orders, all rejected 924   -> acceptance FAIL, and the canary
-     being accepted must NOT rescue it
+  E) 25 strategy orders, all rejected 924   -> acceptance NOT TESTED (the account
+     refused before the accept path ran), and the canary being accepted must NOT
+     rescue it. The account axis must say what to do about it.
+  H) 5 refused 924 + 20 accepted            -> acceptance is measured on the 20
+     the account was allowed to try, and the account axis still FAILS.
 """
 import sys, warnings, logging, tempfile, json, datetime as dt
 from pathlib import Path
@@ -15,7 +18,8 @@ sys.path.insert(0, ".")
 import gap_fade_auto as G
 
 
-def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0):
+def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0,
+          qual_first=None):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
     t.config = G.Config()
     t.config.log_dir = tempfile.mkdtemp()
@@ -33,15 +37,19 @@ def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0):
                "zhang": 1, "price": 50.0, "sl": 52.0, "tp": 48.0, "pos_pct": 0.25,
                "retries": 0, "ack_latency": 0.12, "ack_code": code, "msg": "",
                "submit_ts": ts, "canary": is_canary}
-        if code:
+        if code == 924:
             # what the broker actually sends with a 924 (captured 2026-10-28)
             rec["msg"] = "924"
             rec["broker_msg"] = ("[924] 新增智慧條件單失敗,原因:"
                                  "投資人未具有上櫃股票當沖資格(無券當沖)")
+        elif code:
+            rec["msg"] = str(code)
+            rec["broker_msg"] = f"[{code}] some other broker refusal"
         t.exec_stats["orders"].append(rec)
 
     for i in range(n_strategy):
-        add(i, ack_code, False)
+        code = 924 if (qual_first is not None and i < qual_first) else ack_code
+        add(i, code, False)
     if canary:
         add(999, 0, True)
     t._paper_report()
@@ -96,9 +104,15 @@ check("D ack gate is real at n=25",
 
 print("E) 25 strategy orders all rejected 924, canary accepted")
 e = build(25, ack_code=924, at=(9, 0, 12), canary=True, smart_rows=1)
-check("E acceptance FAILS even though the canary was accepted",
-      gate(e, "order acceptance") == {"order acceptance 100%": False},
+check("E acceptance is NOT TESTED, not a pass, even though the canary was accepted",
+      any("NOT TESTED" in k and v is False for k, v in gate(e, "order acceptance").items()),
       str(gate(e, "order acceptance")))
+check("E the account axis says the qualification is missing",
+      gate(e, "account") == {"account: day-trade qualification held": False},
+      str(gate(e, "account")))
+check("E the blocker is filed under ACCOUNT, not under the integration",
+      e["blocking_axis"] == "account" and not e["blockers_technical"],
+      f'axis={e["blocking_axis"]} tech={e["blockers_technical"]}')
 check("E the canary check passes on its own merits (order accepted + row received)",
       gate(e, "canary") == {"canary: an accepted order produced a smart-report row": True},
       str(gate(e, "canary")))
@@ -107,23 +121,38 @@ check("E the 924 qualification blocker is still named",
 
 print("F) 25 strategy orders all rejected 924, in session, no canary")
 f = build(25, ack_code=924, at=(9, 0, 12))
-check("F acceptance FAIL (a real, earned failure)",
-      gate(f, "order acceptance") == {"order acceptance 100%": False},
+check("F acceptance is NOT TESTED - the account refused before the accept path ran",
+      any("NOT TESTED" in k and v is False for k, v in gate(f, "order acceptance").items()),
       str(gate(f, "order acceptance")))
 check("F ack is NOT TESTED - there is no accepted order to time",
       any("no accepted order to time" in k and v is False for k, v in gate(f, "ack").items()),
       str(gate(f, "ack")))
-check("F the blocker says the accept-path latency is unmeasured",
-      any("accept-path latency unmeasured" in x for x in f["blockers"]), str(f["blockers"]))
+check("F the accept-path gap is filed as unmeasurable-via-account, not as a code finding",
+      any("refused by the account" in x for x in f["unmeasurable_via_account"]),
+      str(f["unmeasurable_via_account"]))
+check("F no technical blocker is invented out of an account refusal",
+      f["blocking_axis"] == "account" and not f["blockers_technical"],
+      f'axis={f["blocking_axis"]} tech={f["blockers_technical"]}')
 
 print("G) 25 rejected + an accepted canary: the canary ack must not time the accept path")
 g = build(25, ack_code=924, at=(9, 0, 12), canary=True, smart_rows=1)
 check("G ack is still NOT TESTED even though the canary was accepted",
       any("no accepted order to time" in k and v is False for k, v in gate(g, "ack").items()),
       str(gate(g, "ack")))
-check("G acceptance still FAIL",
-      gate(g, "order acceptance") == {"order acceptance 100%": False},
+check("G acceptance is still NOT TESTED",
+      any("NOT TESTED" in k and v is False for k, v in gate(g, "order acceptance").items()),
       str(gate(g, "order acceptance")))
+
+print("H) 5 refused 924 + 20 accepted, in session")
+h = build(25, at=(9, 0, 12), qual_first=5)
+check("H acceptance is measured on the 20 the account was allowed to try",
+      gate(h, "order acceptance") == {"order acceptance 100%": True},
+      str(gate(h, "order acceptance")))
+check("H the account axis still FAILS because 5 orders were refused",
+      gate(h, "account") == {"account: day-trade qualification held": False},
+      str(gate(h, "account")))
+check("H the ack gate times only the accepted path",
+      gate(h, "ack") == {"ack p90 < 2000ms": True}, str(gate(h, "ack")))
 
 print()
 ok = all(c for _, c, _ in results)

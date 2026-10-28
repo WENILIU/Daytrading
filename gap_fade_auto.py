@@ -606,6 +606,22 @@ def _in_trading_session(ts: float) -> bool:
     return (_dt.time(9, 0) <= t.time() <= _dt.time(13, 30)) and t.weekday() < 5
 
 
+def _is_qual_rejection(order: dict) -> bool:
+    """True when the broker refused because the ACCOUNT lacks a day-trade qualification.
+
+    Captured 2026-10-28: every strategy order came back
+    ``[924] 新增智慧條件單失敗,原因:投資人未具有上櫃股票當沖資格(無券當沖)``.
+    That is an account-configuration answer, not a technical one - the payload,
+    the submit path and the ack path were never exercised. Counting it as a
+    failed acceptance test means the report can never say "the integration is
+    ready" even after the qualification is granted, and the user cannot tell a
+    broken integration from an unprovisioned account. The report separates the
+    two axes and this function is what tells them apart.
+    """
+    text = f"{order.get('broker_msg') or ''}{order.get('msg') or ''}"
+    return "當沖資格" in text or order.get("ack_code") == 924
+
+
 def _parse_smart_key(message: str) -> str:
     """Pull the 條件單號 (smart-order key) out of a SendStockStrategyDayTrade ack.
 
@@ -3304,6 +3320,11 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         all_orders = self.exec_stats.get("orders", [])
         canaries = [o for o in all_orders if o.get("canary")]
         orders = [o for o in all_orders if not o.get("canary")]
+        # A 924 is the account saying "you do not hold the day-trade
+        # qualification". It says nothing about the order path, so it leaves the
+        # acceptance denominator and is reported on its own axis below.
+        qual_blocked = [o for o in orders if _is_qual_rejection(o)]
+        eligible = [o for o in orders if not _is_qual_rejection(o)]
         # Accepted and rejected acks are different measurements. The
         # "ack p90 < 2000ms PASS" on 2026-10-28 was computed from six acks that
         # were ALL 924 rejections - it said nothing about the accepted path, and
@@ -3313,7 +3334,10 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         rej_acks = [o["ack_latency"] for o in orders
                     if o.get("ack_code") not in (0, None) and o.get("ack_latency")]
         codes = [o.get("ack_code") for o in orders]
-        rejected = [o for o in orders if o.get("ack_code") != 0]
+        accepted = [o for o in orders if o.get("ack_code") == 0]
+        # The acceptance gate measures only orders the account was allowed to
+        # try in the first place.
+        rejected = [o for o in eligible if o.get("ack_code") != 0]
         slips = [x["adverse_pct"] for x in self.exec_stats.get("entry_slippage", [])]
         trades = self.closed_trades
 
@@ -3325,35 +3349,50 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                       f"{len(codes)-len(rejected)} | rejected: {len(rejected)}"
                       + (f"  (plus {len(canaries)} canary, reported separately)"
                          if canaries else ""))
-        for o in rejected:
+        for o in [x for x in orders if x.get("ack_code") not in (0, None)]:
             why = str(o.get("broker_msg") or o.get("msg", ""))
-            self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {why[:120]}")
-        # Rejections that repeat with the SAME broker reason are an account
-        # qualification problem, not a per-order glitch. Name the fix instead of
-        # making the user diff 7 identical lines.
+            axis = "ACCOUNT" if _is_qual_rejection(o) else "REJECT"
+            self.log.info(f"    {axis} {o['symbol']}: code={o['ack_code']} {why[:120]}")
+        # Two different questions get two different answers here.
+        #   ACCOUNT   - does this account hold the broker's day-trade
+        #               qualification? Granted by application; 上市 and 上櫃 are
+        #               approved separately. Nothing about the strategy is judged.
+        #   TECHNICAL - does the submit/ack/status path actually work?
+        # Folding the first into the second made the 2026-10-28 run report
+        # "not-live-ready" for a reason no code change can fix, and hid the fact
+        # that the accept path was never measured at all.
         blockers = []
-        if rejected:
-            groups = {}
-            for o in rejected:
+        account_blockers = []
+        # Technical gates that cannot be measured *because* the account refused
+        # every order. They keep their checks at NOT TESTED (so the verdict stays
+        # conservative) but they are not findings about the integration.
+        unmeasurable = []
+
+        def group(items):
+            out = {}
+            for o in items:
                 key = str(o.get("broker_msg") or o.get("msg", ""))[:90].strip()
-                groups[key] = groups.get(key, 0) + 1
-            for key, n in sorted(groups.items(), key=lambda kv: -kv[1]):
-                if n < 2:
-                    continue
-                self.log.warning(f"  SYSTEMIC: {n}/{len(codes)} orders rejected for the "
-                                 f"same reason: {key}")
-                if "當沖資格" in key:
-                    side = "無券當沖(放空)" if any(
-                        o.get("direction") == "SHORT" for o in rejected) else "當沖"
-                    self.log.warning(
-                        f"    -> the account does not hold the broker's {side} "
-                        "qualification. This is granted by application and 上市 / "
-                        "上櫃 are approved separately, so one can work while the "
-                        "other does not. Until it is on, every affected signal is "
-                        "untradeable no matter what the model says.")
-                    blockers.append(f"broker qualification missing: {key}")
-                else:
-                    blockers.append(f"systemic order rejection x{n}: {key}")
+                out[key] = out.get(key, 0) + 1
+            return sorted(out.items(), key=lambda kv: -kv[1])
+
+        for key, n in group(qual_blocked):
+            self.log.warning(f"  ACCOUNT: {n}/{len(codes)} orders refused by the "
+                             f"broker's day-trade qualification: {key}")
+            need = " / ".join(x for x in ("上市", "上櫃") if x in key) or "上市 / 上櫃"
+            self.log.warning(
+                f"    -> the account does not hold the {need} 無券當沖 qualification. "
+                "Apply for it; the two markets are approved separately, so one can "
+                "work while the other does not. This is an ACCOUNT blocker: the "
+                "strategy and the integration are not being judged, and until it "
+                "is on the accept path cannot even be measured.")
+            account_blockers.append(f"broker qualification missing: {key}")
+
+        for key, n in group(rejected):
+            if n < 2:
+                continue
+            self.log.warning(f"  SYSTEMIC: {n}/{len(eligible)} orders rejected for the "
+                             f"same reason: {key}")
+            blockers.append(f"systemic order rejection x{n}: {key}")
         # An order sent outside the session comes back ack_code 0 with an empty
         # message (measured 2026-10-28 13:37, after the close). The broker does
         # not check the day-trade qualification then, so treating that as a pass
@@ -3376,14 +3415,38 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 f"  order acceptance: NOT TESTED. {len(off_hours)}/{len(codes)} "
                 f"orders were sent outside the trading session (earliest {when}). "
                 f"The broker answers code 0 after the close without checking the "
-                f"day-trade qualification, so the {len(codes)-len(rejected)} "
+                f"day-trade qualification, so the {len(accepted)} "
                 f"'accepted' orders above prove nothing about live behaviour.")
             checks.append(("order acceptance [NOT TESTED - sent outside market hours]", False))
             blockers.append(
                 f"acceptance unmeasurable: {len(off_hours)}/{len(codes)} orders "
                 f"sent outside 09:00-13:30 (earliest {when})")
+        elif not eligible:
+            self.log.warning(
+                f"  order acceptance: NOT TESTED. All {len(qual_blocked)} strategy "
+                f"orders were refused by the account's day-trade qualification "
+                f"(924), so the accept path was never exercised. This is not a "
+                f"technical failure and it disappears the day the qualification "
+                f"is granted.")
+            checks.append(("order acceptance [NOT TESTED - account qualification "
+                           "blocked every order]", False))
         else:
-            checks.append(("order acceptance 100%", not rejected and bool(codes)))
+            checks.append(("order acceptance 100%", not rejected and bool(eligible)))
+
+        # The account axis gets its own line so "not live-ready" can be read
+        # without guessing which half is broken.
+        if not codes:
+            checks.append(("account: day-trade qualification [NOT TESTED - no order sent]", False))
+        elif qual_blocked:
+            self.log.warning(f"  account readiness: MISSING. {len(qual_blocked)}/"
+                             f"{len(codes)} orders refused for lacking the day-trade "
+                             f"qualification. Action: apply with the broker (上市 and "
+                             f"上櫃 separately).")
+            checks.append(("account: day-trade qualification held", False))
+        else:
+            self.log.info(f"  account readiness: OK, {len(accepted)} order(s) the "
+                          f"qualification would have refused were accepted.")
+            checks.append(("account: day-trade qualification held", True))
 
         def show_ack(tag, v):
             self.log.info(f"    {tag}: n={len(v)} p50 {st.median(v)*1000:.0f}ms "
@@ -3415,7 +3478,12 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 f"fast - that is not the path live uses, so this cannot be a pass.")
             show_ack("submit->ack REJECTED", rej_acks)
             checks.append(("ack p90 < 2000ms [NOT TESTED - no accepted order to time]", False))
-            blockers.append("no accepted order to time - accept-path latency unmeasured")
+            if qual_blocked and len(qual_blocked) == len(orders):
+                unmeasurable.append(
+                    "accept-path latency - every order was refused by the account "
+                    "qualification (924), so nothing was ever accepted to time")
+            else:
+                blockers.append("no accepted order to time - accept-path latency unmeasured")
         elif len(acc_acks) < MIN_ACK_SAMPLES:
             # pct() falls back to max() below 20 samples, so with n=6 the "p90"
             # printed here IS the maximum. On 2026-10-28 that made a PASS out of
@@ -3515,7 +3583,36 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         ok = all(v for _, v in checks)
         for name, passed in checks:
             self.log.info(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+
+        # Which half is holding the strategy back? "not-live-ready" on its own
+        # sent 2026-10-28's report to read like a code failure when it was an
+        # account setting, and hid that the technical side had zero evidence.
+        if ok:
+            axis = "none"
+        elif blockers and account_blockers:
+            axis = "account + technical"
+        elif blockers:
+            axis = "technical"
+        elif account_blockers or unmeasurable:
+            axis = "account"
+        else:
+            axis = "technical"
         self.log.info(f"  VERDICT: {'live-ready' if ok else 'NOT live-ready'}")
+        self.log.info(f"    blocking axis     : {axis}")
+        self.log.info(f"    account readiness : "
+                      + ("OK" if not account_blockers and codes else
+                         "MISSING QUALIFICATION - apply with the broker"
+                         if account_blockers else
+                         "not assessed (no strategy order was sent)"))
+        if blockers:
+            tech = "NOT PROVEN -> " + " | ".join(blockers)
+        elif unmeasurable:
+            tech = ("NOT MEASURABLE until the qualification is granted -> "
+                    + " | ".join(unmeasurable)
+                    + "  (nothing about the strategy or the code has been judged)")
+        else:
+            tech = "OK"
+        self.log.info(f"    technical readiness: {tech}")
 
         out = Path(self.config.log_dir) / f"paper_report_{datetime.now():%Y%m%d}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -3525,7 +3622,11 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
             "trades": trades,
             "checks": {k: bool(v) for k, v in checks},
-            "blockers": blockers,
+            "blockers": blockers + account_blockers,
+            "blockers_technical": blockers,
+            "unmeasurable_via_account": unmeasurable,
+            "blockers_account": account_blockers,
+            "blocking_axis": axis,
             "verdict": "live-ready" if ok else "not-live-ready",
         }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         self.log.info(f"  wrote {out}")
