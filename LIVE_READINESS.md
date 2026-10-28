@@ -319,6 +319,26 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
 
 有 FAIL 就 `exit 1` 並印「不要啟動」。今晚最後一次跑：**9/9 PASS**。
 
+**0.5 再跑 `python test_paper_path.py`（2026-10-28 新增，約 15 秒，不碰市場）**
+`preflight` 查的是**外部依賴**（網路、帳戶、檔案）。這一支查的是**報告本身會不會
+說謊**——它跑的是 `LIVE FEASIBILITY REPORT` 背面的斷言。會寫這一支，是因為今天
+一口氣找到三個「沒挣到的 PASS」（§11.6 盤後送單回 code 0、§11.7 canary 撐起
+acceptance 與 n=6 的 p90、§11.8 六張被拒的單算出 accept 延遲）。
+六個 suite、25 項斷言，2026-10-28 14:2x 實測 **6/6 通過**：
+
+| suite | 它在守住什麼 |
+|---|---|
+| `_test_gates.py` | 七種情境下報告都不會給出沒挣到的 PASS |
+| `_test_session_gate.py` | 盤後送的單一律 NOT TESTED |
+| `_test_start_guard.py` | `paper` 在 08:55–13:25 之外拒絕啟動 |
+| `_test_prestart_per_symbol.py` | 晚啟動的結算會被標 `_PRESTART`；正常啟動不會被誤標 |
+| `_test_canary.py` | canary 會挑最便宜的 LONG、以現股買掛跌停 |
+| `_test_pre.py` | 晚啟動不能憑空創造成交 |
+
+**FAIL 就不要啟動 paper**：那代表今天要跑的程式壞了，不是市場的問題。
+測試檔已進 repo（`.gitignore` 的 `_*` 原本把 `_test_*.py` 擋掉，已加反向規則；
+之前 `test_paper_path.py` 進去了但測試沒進去，clone 下來會報 [MISSING]）。
+
 另外把 paper 的淨值檔隔離成 `equity_state_paper.json`：paper 的損益是模擬的，
 不該變成之後 `live` 讀到的回撤剎車。已雙向驗證（paper 寫檔後，新开的 live
 實例仍從 4,500,000 開始）。
