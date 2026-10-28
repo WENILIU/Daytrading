@@ -11,7 +11,7 @@ Sends no orders. Safe at 08:55. Exits non-zero if anything essential failed.
 """
 import sys, json, time
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, ".")
@@ -28,6 +28,9 @@ def add(name, ok, detail, level=None):
 
 
 t = GapFadeAutoTrader(cfg)
+# check 3 needs the session calendar too - the factor panel must end at the
+# previous SESSION, which is not the same as "yesterday".
+cal = None
 
 # 1. is today even a trading day
 try:
@@ -73,8 +76,29 @@ try:
             "panel did not load at all - the model would score with NaN factors", "FAIL")
     else:
         asof = (pd.Timestamp(date.today()) - pd.Timedelta(days=int(lag))).date()
-        ok = (not degraded) and lag <= 1
-        detail = (f"as-of {asof} lag {lag}d, turnover keys {n_keys}; "
+        # The panel must end at the previous SESSION. `lag` is in CALENDAR days,
+        # so `lag <= 1` fails on every Monday and every day after a holiday:
+        # on Mon 2026-11-02 a panel ending Fri 2026-10-30 is exactly T-1 and
+        # correct, but lag would read 3 and the whole morning would stop.
+        # Ask the calendar instead. Without it, fall back and say so.
+        t1 = None
+        if cal is not None:
+            try:
+                t1 = pd.Timestamp(cal.previous_session(
+                    date.today() - timedelta(days=1))).date()
+            except Exception:
+                t1 = None
+        if t1 is not None:
+            ok = (not degraded) and asof >= t1
+            age = (f"panel ends {asof}, previous session {t1} "
+                   f"({'current' if asof >= t1 else 'STALE by ' + str((t1 - asof).days) + 'd'}"
+                   f", calendar lag {lag}d)")
+        else:
+            ok = (not degraded) and lag <= 1
+            age = (f"as-of {asof} lag {lag}d - CALENDAR-DAY fallback in use "
+                   f"(no session calendar), so a Monday or a post-holiday "
+                   f"morning can fail this check wrongly")
+        detail = (f"{age}, turnover keys {n_keys}; "
                   f"factors {'WILL be used' if not degraded else 'REPLACED BY NaN'} "
                   f"(stale limit {cfg.max_factor_lag_days}d). Measured cost of the panel "
                   f"going away: 2023-25 segment 1692% -> 260%. Fix: "

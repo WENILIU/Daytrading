@@ -1,4 +1,7 @@
-"""Run the paper-mode offline test suite. No market, no orders, no network.
+"""Run the paper-mode offline test suite. No market session, no orders.
+
+One suite (`_test_t1_panel_age.py`) reads the finlab session calendar, so it
+needs the network; the rest run entirely offline.
 
 These are the assertions behind the LIVE FEASIBILITY REPORT. They exist because
 the report kept finding ways to print a PASS it had not earned (an after-hours
@@ -32,6 +35,9 @@ SUITES = [
      "the canary picks the cheapest LONG and sends 1 張 現股買 at 跌停"),
     ("_test_pre.py",
      "a late start must not invent a fill out of a level it never saw crossed"),
+    ("_test_t1_panel_age.py",
+     "the factor panel is judged against the previous SESSION, not calendar days "
+     "(a Monday would have failed a correct Friday panel)"),
 ]
 
 
