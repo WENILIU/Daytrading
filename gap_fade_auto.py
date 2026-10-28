@@ -3555,7 +3555,14 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         YYYYMMDD format - all three variants returned today's rows). Anything not
         captured by the close cannot be reconstructed afterwards.
 
-        Returns {"orders": {order_id: parsed}, "unparsed": [raw, ...]}.
+        Returns orders / unparsed plus the buckets the feasibility report needs:
+        by_status, filled (41 or 成交數量>0), triggered (37/38 - the smart order
+        fired our SL/TP and sent a real order), rejected (33/39/40).
+
+        filled and triggered are the two things live actually has to prove: that a
+        stop-loss condition we set really fires, and that we can see the fill. A
+        session where every row is 32 proves the channel works but proves nothing
+        about execution, so the report must say which of the two it saw.
         """
         latest, unparsed = {}, []
         for r in getattr(self, "_smart_reports", []) or []:
@@ -3565,7 +3572,18 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                     unparsed.append(d["raw"])
                 continue
             latest[d["order_id"]] = d
-        return {"orders": latest, "unparsed": unparsed}
+        by_status, filled, triggered, rejected = {}, [], [], []
+        for oid, d in latest.items():
+            code = d.get("status_code")
+            by_status[code] = by_status.get(code, 0) + 1
+            if d.get("filled"):
+                filled.append(oid)
+            if code in (37, 38):
+                triggered.append(oid)
+            if code in (33, 39, 40):
+                rejected.append(oid)
+        return {"orders": latest, "unparsed": unparsed, "by_status": by_status,
+                "filled": filled, "triggered": triggered, "rejected": rejected}
 
     def _log_smart_status(self):
         s = self._smart_status_summary()
@@ -3573,9 +3591,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         if not orders and not s["unparsed"]:
             self.log.info("  [SMART STATUS] no smart-order report received")
             return s
-        by_status = {}
-        for d in orders.values():
-            by_status[d.get("status_code")] = by_status.get(d.get("status_code"), 0) + 1
+        by_status = s["by_status"]
         self.log.info(f"  [SMART STATUS] {len(orders)} order(s) reported | "
                       f"by status: " + ", ".join(
                           f"{k} {SMART_STATUS.get(k, '?')} x{v}" for k, v in sorted(
@@ -3820,6 +3836,37 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 blockers.append(f"{bad} smart-order row(s) could not be decoded - "
                                 "the row layout may have changed since 2026-10-28")
 
+        # Decoding the channel is not the end of it. The two things live has to
+        # show are that a stop-loss/take-profit condition we set actually FIRES
+        # (status 37/38) and that a fill becomes visible (41 or 成交數量>0). A
+        # session where every row is 32 shows the channel works and shows nothing
+        # about execution - and every session so far has been exactly that,
+        # because the probe prices are deliberately unreachable. Say which one
+        # happened instead of letting a decoded channel read as a pass.
+        if smart["orders"]:
+            seen = sorted((k, v) for k, v in smart["by_status"].items() if k is not None)
+            self.log.info(f"  smart-order states seen: "
+                          + ", ".join(f"{k} {SMART_STATUS.get(k, '?')} x{v}"
+                                      for k, v in seen)
+                          + f" | triggered (SL/TP fired): {len(smart['triggered'])} "
+                          f"| broker-confirmed fills: {len(smart['filled'])}")
+            if not smart["triggered"] and not smart["filled"]:
+                self.log.warning(
+                    "    every row is a pre-trigger state. The channel is readable "
+                    "but no stop-loss/take-profit condition has been observed firing "
+                    "and no fill has been observed. Probe orders sit at unreachable "
+                    "prices by design, so this is NOT a pass - it is the next thing "
+                    "to measure, and it needs real tickets (and the day-trade "
+                    "qualification) to become measurable.")
+                checks.append(("smart-order trigger or fill observed [NOT TESTED - "
+                               "only pre-trigger states were seen]", False))
+                # Deliberately NOT added to `blockers`: probe orders sit at
+                # unreachable prices by design, so paper mode will essentially never
+                # see a trigger. Putting a permanent structural fact in the blockers
+                # list would read like something broke today. The NOT TESTED check
+                # above is what keeps the verdict honest, and the counts below are
+                # what the 13:32 report reads.
+
         # The gate used to be "adverse p90 < 0.5 pct", which is WRONG and would
         # have failed every normal day: measured on 2026 1-minute data the
         # opening price is readable at p50 +10s and acting then costs +0.098 pct
@@ -3938,6 +3985,11 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 for d in sorted(smart["orders"].values(),
                                 key=lambda x: x["order_id"])],
             "smart_order_rows_undecoded": len(smart["unparsed"]),
+            "smart_order_summary": {
+                "by_status": {str(k): v for k, v in smart["by_status"].items()},
+                "triggered": len(smart["triggered"]),
+                "broker_confirmed_fills": len(smart["filled"]),
+                "rejected": len(smart["rejected"])},
             "blockers": blockers + account_blockers,
             "blockers_technical": blockers,
             "unmeasurable_via_account": unmeasurable,

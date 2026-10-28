@@ -77,6 +77,48 @@ for marker, label in [("##", "bare ## marker"), ("##,,,,,,,,", "## padded with c
 check("a truncated real row is NOT ignorable - unknown rows stay loud",
       short["parsed"] is False and short.get("ignorable") is False, str(short))
 
+
+# --- the summary buckets: what the feasibility report reads ---
+# The real stream repeats every order several times (the 2026-10-28 rows came in
+# four report pushes), so newest-state-per-order and no double counting is not a
+# detail, it is the difference between "6 orders" and "24 orders".
+def with_status(row, oid, status, filled=""):
+    r = row.replace(row.split(",")[0] + ",", oid + ",", 1)
+    return r.replace(",32,,", f",{status},{filled},")
+
+
+t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
+t._smart_reports = [{"row": x} for x in [ROW_6108, ROW_6108, "##"]]
+sm = t._smart_status_summary()
+check("repeated rows for one order collapse to one order, and ## is not a bad row",
+      len(sm["orders"]) == 1 and not sm["unparsed"],
+      f'{len(sm["orders"])} orders, {len(sm["unparsed"])} unparsed')
+check("a session where nothing fired is reported as nothing fired",
+      sm["triggered"] == [] and sm["filled"] == [] and sm["rejected"] == []
+      and sm["by_status"] == {32: 1}, str(sm))
+
+t._smart_reports = [{"row": x} for x in [
+    ROW_6108,
+    with_status(ROW_6278, "27478650", 38),
+    with_status(ROW_6108, "27478652", 41, "1000"),
+    with_status(ROW_6108, "27478653", 33),
+]]
+sm2 = t._smart_status_summary()
+check("status 38 is counted as a trigger - that is the stop-loss actually firing",
+      sm2["triggered"] == ["27478650"], str(sm2["triggered"]))
+check("a real fill is counted as broker-confirmed",
+      sm2["filled"] == ["27478652"], str(sm2["filled"]))
+check("rejections are separated from triggers",
+      sm2["rejected"] == ["27478653"], str(sm2["rejected"]))
+
+# an order that moves 32 -> 41 must be counted once, in its newest state
+t._smart_reports = [{"row": x} for x in [
+    ROW_6108, with_status(ROW_6108, "27478651", 41, "1000")]]
+sm3 = t._smart_status_summary()
+check("newest state wins: an order that moved 32 -> 41 is one order, counted as filled",
+      len(sm3["orders"]) == 1 and sm3["by_status"] == {41: 1}
+      and sm3["filled"] == ["27478651"], str(sm3))
+
 print()
 ok = all(results)
 print(f"{sum(results)}/{len(results)} checks passed -> " + ("ALL OK" if ok else "FAILED"))
