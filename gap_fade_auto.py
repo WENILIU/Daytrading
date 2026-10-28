@@ -2217,6 +2217,11 @@ class GapFadeAutoTrader:
         else:
             msg = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(nCode)
             rec["msg"] = str(msg)
+            # The SDK's own text for a code is just the code ("924"). The
+            # broker's actual reason - "投資人未具有上市股票當沖資格(無券當沖)" -
+            # only ever arrived in bstrMessage and was logged then dropped, so
+            # the report could not say what to go fix. Keep it on the record.
+            rec["broker_msg"] = str(bstrMessage)
             self.log.error(f"  {sig.symbol}: order failed - {msg} ({bstrMessage})")
             sig.state = PositionState.CANCELLED
 
@@ -2958,8 +2963,9 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         if sig.state == PositionState.CANCELLED:
             rec = next((r for r in reversed(self.exec_stats.get("orders", []))
                         if r["symbol"] == sig.symbol), None) or {}
+            why = str(rec.get("broker_msg") or rec.get("msg", ""))
             self.log.info(f"  [PAPER] {sig.symbol} probe rejected "
-                          f"code={rec.get('ack_code')} {str(rec.get('msg',''))[:150]}")
+                          f"code={rec.get('ack_code')} {why[:150]}")
             self.log.info(f"  [PAPER] {sig.symbol} simulating the intended ticket "
                           f"anyway; the rejection is counted as a submit failure")
             sig.state = PositionState.FILLED
@@ -2996,6 +3002,13 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         force_dt = self._parse_time(self.config.force_exit_time)
         end_dt = force_dt + timedelta(minutes=5)
         first_poll = True
+        # Between exits this session is silent, and these logs are what gets
+        # reviewed afterwards to decide whether live behaved as modelled. A
+        # heartbeat makes "is it still polling, and how fast did a round take"
+        # answerable from the log alone instead of inferred from the process
+        # still existing.
+        heartbeat_sec = 300.0
+        next_beat = time.time() + heartbeat_sec
 
         while self.running:
             now = datetime.now()
@@ -3008,10 +3021,32 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 self.log.info("  All paper positions resolved.")
                 break
 
+            t_fetch = time.time()
             prices = self._fetch_prices([sig.symbol for sig in open_sigs])
+            fetch_sec = time.time() - t_fetch
             if first_poll:
                 self._measure_entry_slippage(prices)
                 first_poll = False
+
+            if time.time() >= next_beat:
+                next_beat = time.time() + heartbeat_sec
+                self.log.info(f"  [PAPER HEARTBEAT] {now:%H:%M:%S} "
+                              f"open={len(open_sigs)} round_trip={fetch_sec*1000:.0f}ms")
+                for sig in open_sigs:
+                    px = prices.get(sig.symbol)
+                    if not px:
+                        self.log.info(f"      {sig.symbol}: no quote this round")
+                        continue
+                    if sig.direction == Direction.SHORT:
+                        to_sl = (sig.sl_price - px) / px * 100
+                        to_tp = (sig.tp_price - px) / px * 100
+                    else:
+                        to_sl = (px - sig.sl_price) / px * 100
+                        to_tp = (px - sig.tp_price) / px * 100
+                    self.log.info(
+                        f"      {sig.symbol} {sig.direction.value} px={px} "
+                        f"entry={sig.entry_price} SL={sig.sl_price}({to_sl:+.2f}%) "
+                        f"TP={sig.tp_price}({to_tp:+.2f}%)")
 
             force = now >= force_dt
             for sig in open_sigs:
@@ -3056,7 +3091,8 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         self.log.info(f"  Orders sent: {len(codes)} | accepted: {len(codes)-len(rejected)} "
                       f"| rejected: {len(rejected)}")
         for o in rejected:
-            self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {o.get('msg','')[:120]}")
+            why = str(o.get("broker_msg") or o.get("msg", ""))
+            self.log.info(f"    REJECT {o['symbol']}: code={o['ack_code']} {why[:120]}")
         # Rejections that repeat with the SAME broker reason are an account
         # qualification problem, not a per-order glitch. Name the fix instead of
         # making the user diff 7 identical lines.
@@ -3064,7 +3100,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         if rejected:
             groups = {}
             for o in rejected:
-                key = str(o.get("msg", ""))[:90].strip()
+                key = str(o.get("broker_msg") or o.get("msg", ""))[:90].strip()
                 groups[key] = groups.get(key, 0) + 1
             for key, n in sorted(groups.items(), key=lambda kv: -kv[1]):
                 if n < 2:
