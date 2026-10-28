@@ -1,6 +1,9 @@
 '
 # scratch scripts written ad hoc during research
 _*
+# ...but _test_*.py are assertions, not scratch: test_paper_path.py runs them,
+# and a clone without them reports [MISSING].
+!_test_*.py
 # runtime output
 trading_logs/
 equity_state.json
