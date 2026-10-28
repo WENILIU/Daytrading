@@ -1239,3 +1239,40 @@ A 盤後送單 / B 盤中 n=3 / C 只有 canary 被接受 / D 盤中 25 張 / E 
 **這三個是同一個教訓**：一份可行性報告裡，「沒有證據」和「證據是好的」
 必須用不一樣的字寫出來。現在 `checks` 只有三種結果——
 真的 PASS、真的 FAIL、以及 `NOT TESTED`（一律計入 FAIL 並寫進 `blockers`）。
+
+---
+
+### 11.8 那個 `ack p90 < 2000ms PASS` 是**全部被拒的單**算出來的（2026-10-28 報告實查）
+
+把 repo 裡那份 `paper_report_20261028.json` 攤開看：
+
+```
+6173 code=924 ack=1.865s      6278 code=924 ack=0.128s
+6213 code=924 ack=0.092s      6108 code=924 ack=0.105s
+6672 code=924 ack=0.092s      3105 code=924 ack=0.117s
+
+accepted acks: 0 | rejected acks: 6
+checks: {"order acceptance 100%": false, "ack p90 < 2000ms": true, ...}
+```
+
+**六筆全部是 924 拒絕，卻給出 acceptance FAIL + ack PASS。**
+被拒的單當然是快——券商看一眼帳戶資格就回你，根本沒進交易所。
+所以那個 PASS 測的是「拒絕有多快」，不是 live 要的那條「被接受要多久」。
+這是 §11.6、§11.7 之後同一個漏洞的第三種形狀。
+
+**已修**：accept 與 reject 的 ack 分開算、分開印。
+* 閘門只用**被接受**的單的延遲。
+* 一筆被接受的單都沒有 → `NOT TESTED - no accepted order to time`，計入 FAIL，
+  並寫進 `blockers`（被拒的數字照樣印出來當參考）。
+* 被接受的單不足 20 筆 → 一樣 NOT TESTED（`pct()` 在 n<20 時回的是最大值）。
+
+**順帶看到一件明天要注意的事（一筆觀察，不是結論）**
+第一張單的 ack 是 **1865ms**，後面五張是 **92–128ms**，差約 15 倍。
+如果這是連線後的冷啟動，那**最慢的那一張剛好就是 09:00 那一张**。
+n=1 不能當結論，所以現在報告每次都會把「第一張 vs 其餘 p50」分開印出來；
+明天 n 夠了就知道這是常態還是偶爾。若是常態，解法是 09:00 前先暖一次委託通道。
+
+**驗證**：`_test_gates.py` 現在七個情境 16 項斷言，新增
+F（25 張全被 924 拒、無 canary）與 G（25 張被拒 + canary 被接受）。
+關鍵是 **G：canary 被接受的延遲不能拿來替策略單的 accept 路徑背書。**
+`_test_session_gate.py`、`_test_start_guard.py`、`_test_canary.py`、`_test_pre.py` 一併重跑，全過。

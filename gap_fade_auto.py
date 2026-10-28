@@ -3279,7 +3279,14 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         all_orders = self.exec_stats.get("orders", [])
         canaries = [o for o in all_orders if o.get("canary")]
         orders = [o for o in all_orders if not o.get("canary")]
-        acks = [o["ack_latency"] for o in orders if o.get("ack_latency")]
+        # Accepted and rejected acks are different measurements. The
+        # "ack p90 < 2000ms PASS" on 2026-10-28 was computed from six acks that
+        # were ALL 924 rejections - it said nothing about the accepted path, and
+        # that is the one live depends on.
+        acc_acks = [o["ack_latency"] for o in orders
+                    if o.get("ack_code") == 0 and o.get("ack_latency")]
+        rej_acks = [o["ack_latency"] for o in orders
+                    if o.get("ack_code") not in (0, None) and o.get("ack_latency")]
         codes = [o.get("ack_code") for o in orders]
         rejected = [o for o in orders if o.get("ack_code") != 0]
         slips = [x["adverse_pct"] for x in self.exec_stats.get("entry_slippage", [])]
@@ -3353,32 +3360,53 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         else:
             checks.append(("order acceptance 100%", not rejected and bool(codes)))
 
-        if acks and off_hours:
+        def show_ack(tag, v):
+            self.log.info(f"    {tag}: n={len(v)} p50 {st.median(v)*1000:.0f}ms "
+                          f"max {max(v)*1000:.0f}ms")
+            if len(v) >= 2:
+                # The first order after connect is the one sent at 09:00. On
+                # 2026-10-28 it took 1865ms while the five after it took
+                # 92-128ms. One observation is not proof, but it is the order
+                # that matters most, so it gets its own line every time.
+                self.log.info(f"      first after connect {v[0]*1000:.0f}ms vs the "
+                              f"rest p50 {st.median(v[1:])*1000:.0f}ms")
+
+        if not (acc_acks or rej_acks):
+            checks.append(("ack measured", False))
+        elif off_hours:
             self.log.warning(
-                f"  submit->ack: NOT TESTED. Same reason - an after-hours ack is "
-                f"not the latency the exchange will give. The "
-                f"{len(acks)} readings below are printed for reference only.")
-            self.log.info(f"    (after-hours ack: p50 {st.median(acks)*1000:.0f}ms "
-                          f"max {max(acks)*1000:.0f}ms)")
+                "  submit->ack: NOT TESTED. Same reason - an after-hours ack is "
+                "not the latency the exchange will give. The readings below are "
+                "printed for reference only.")
+            if rej_acks:
+                show_ack("(after-hours) submit->ack REJECTED", rej_acks)
+            if acc_acks:
+                show_ack("(after-hours) submit->ack ACCEPTED", acc_acks)
             checks.append(("ack latency [NOT TESTED - sent outside market hours]", False))
-        elif acks and len(acks) < MIN_ACK_SAMPLES:
+        elif not acc_acks:
+            self.log.warning(
+                f"  submit->ack: NOT TESTED for the accepted path. All "
+                f"{len(rej_acks)} acks were rejections. A rejected order answers "
+                f"fast - that is not the path live uses, so this cannot be a pass.")
+            show_ack("submit->ack REJECTED", rej_acks)
+            checks.append(("ack p90 < 2000ms [NOT TESTED - no accepted order to time]", False))
+            blockers.append("no accepted order to time - accept-path latency unmeasured")
+        elif len(acc_acks) < MIN_ACK_SAMPLES:
             # pct() falls back to max() below 20 samples, so with n=6 the "p90"
             # printed here IS the maximum. On 2026-10-28 that made a PASS out of
             # six orders. Report the numbers, but do not call it a pass.
             self.log.warning(
-                f"  submit->ack: NOT TESTED. n={len(acks)} is below the "
-                f"{MIN_ACK_SAMPLES} orders this gate is sized for; with n={len(acks)} "
-                f"the p90 estimate IS the maximum, so passing would be luck.")
-            self.log.info(f"    (n={len(acks)}: p50 {st.median(acks)*1000:.0f}ms "
-                          f"max {max(acks)*1000:.0f}ms, reference only)")
-            checks.append((f"ack p90 < 2000ms [NOT TESTED - n={len(acks)} < "
+                f"  submit->ack: NOT TESTED. n={len(acc_acks)} accepted orders is "
+                f"below the {MIN_ACK_SAMPLES} this gate is sized for; with "
+                f"n={len(acc_acks)} the p90 estimate IS the maximum, so passing "
+                f"would be luck.")
+            show_ack("(reference) submit->ack ACCEPTED", acc_acks)
+            checks.append((f"ack p90 < 2000ms [NOT TESTED - n={len(acc_acks)} < "
                            f"{MIN_ACK_SAMPLES}]", False))
-        elif acks:
-            self.log.info(f"  submit->ack: p50 {st.median(acks)*1000:.0f}ms "
-                          f"p90 {pct(acks,0.9)*1000:.0f}ms max {max(acks)*1000:.0f}ms")
-            checks.append(("ack p90 < 2000ms", pct(acks, 0.9) < 2.0))
         else:
-            checks.append(("ack measured", False))
+            show_ack("submit->ack ACCEPTED", acc_acks)
+            self.log.info(f"  submit->ack p90 {pct(acc_acks,0.9)*1000:.0f}ms")
+            checks.append(("ack p90 < 2000ms", pct(acc_acks, 0.9) < 2.0))
 
         if canaries:
             acc = [o for o in canaries if o.get("ack_code") == 0]
