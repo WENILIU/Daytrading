@@ -45,6 +45,10 @@ SUITES = [
      "a smart-order row is only reported when every field validates against what we "
      "sent (the real 2026-10-28 rows), a fill is caught from either signal, and the "
      "## terminator is ignored instead of raising a false alarm"),
+    ("_test_probe_sample.py",
+     "the 09:00 quote-readiness probe samples the whole market, not the first 100 "
+     "lines of a sorted file (ETFs + oldest sector), which is not the population "
+     "the orders come from"),
 ]
 
 

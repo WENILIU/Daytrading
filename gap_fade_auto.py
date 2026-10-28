@@ -673,6 +673,25 @@ SMART_ORDER_KIND = {"0": "現股", "1": "代資", "2": "代券", "8": "無券普
 SMART_PRICE_TYPE = {"0": "前日收盤價", "1": "漲停價", "2": "跌停價", "7": "使用者輸入價"}
 
 
+def spread_sample(seq, n: int) -> list:
+    """Take n items evenly spread across the whole sequence.
+
+    The quote-readiness probe used ``stock_list[:100]``. valid_stocks.txt is
+    sorted, so that slice is 0050-0061 (ETFs, which print at the instant of the
+    open) followed by the oldest-sector names. A readiness gate built on that
+    answers "are the ETFs ready", not "are the names this strategy actually
+    trades ready" - and the measured opening-print latency differs by several
+    seconds between those two groups (2026-10-28: signal set p50 7.9s, full
+    market p50 16.3s). Spreading the sample across the list makes the gate
+    describe the population the orders will come from.
+    """
+    items = list(seq)
+    if n <= 0 or len(items) <= n:
+        return items
+    step = len(items) / n
+    return [items[int(i * step)] for i in range(n)]
+
+
 def parse_smart_strategy_report(row: str) -> dict:
     """Decode one OnTSSmartStrategyReport row.
 
@@ -2865,7 +2884,7 @@ class GapFadeAutoTrader:
         backtest cannot know: how many seconds after 09:00:00 the first usable
         opening price is visible (RISK 1).
         """
-        probe = self._load_stock_list()[:100]
+        probe = spread_sample(self._load_stock_list(), 100)
         t_open = self.exec_stats.get("t_open") or time.time()
         deadline = time.time() + timeout_sec
         need = max(1, int(len(probe) * 0.9))
