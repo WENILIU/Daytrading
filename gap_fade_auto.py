@@ -2174,10 +2174,17 @@ class GapFadeAutoTrader:
                               "mode this is expected; the slippage figure comes "
                               "from the paper report's own section instead.")
             else:
-                self.log.warning("  ENTRY SLIPPAGE: not measurable - no fill price "
-                                 "could be recovered from the OnFill args. The raw "
-                                 "args are in this log; use them to fix the field "
-                                 "index in _note_fill.")
+                # Orders were accepted but no fill price reached us. There is no
+                # OnFill event on this API, so the fill can only come from
+                # GetTSSmartStrategyReport -> OnTSSmartStrategyReport. Point at
+                # the real gap instead of telling the reader to fix a positional
+                # index in a callback that never fires.
+                self.log.warning(
+                    "  ENTRY SLIPPAGE: not measurable - orders were accepted but "
+                    "no fill price arrived. This API has no fill event; the fill "
+                    "must come from GetTSSmartStrategyReport -> "
+                    "OnTSSmartStrategyReport. Check whether [SMART REPORT] lines "
+                    "appear in this log; if they do, parse the row format.")
         try:
             import json as _j
             p = Path(self.config.log_dir) / f"exec_report_{datetime.now().strftime('%Y%m%d')}.json"
