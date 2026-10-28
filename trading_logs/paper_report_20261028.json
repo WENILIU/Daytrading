@@ -1,0 +1,224 @@
+{
+  "date": "2026-10-28T13:25:12.473132",
+  "orders": [
+    {
+      "symbol": "6173",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 304.5,
+      "sl": 304.0,
+      "tp": 235.0,
+      "pos_pct": 0.25,
+      "retries": 0,
+      "ack_latency": 1.86482834815979,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上櫃股票當沖資格(無券當沖)"
+    },
+    {
+      "symbol": "6213",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 820.0,
+      "sl": 819.0,
+      "tp": 631.0,
+      "pos_pct": 0.25,
+      "retries": 0,
+      "ack_latency": 0.09222126007080078,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上市股票當沖資格(無券當沖)"
+    },
+    {
+      "symbol": "6672",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 586.0,
+      "sl": 585.0,
+      "tp": 451.0,
+      "pos_pct": 0.25,
+      "retries": 0,
+      "ack_latency": 0.09237933158874512,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上市股票當沖資格(無券當沖)"
+    },
+    {
+      "symbol": "3105",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 540.0,
+      "sl": 539.0,
+      "tp": 418.5,
+      "pos_pct": 0.25,
+      "retries": 0,
+      "ack_latency": 0.11734151840209961,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上櫃股票當沖資格(無券當沖)"
+    },
+    {
+      "symbol": "6278",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 306.0,
+      "sl": 301.5,
+      "tp": 232.0,
+      "pos_pct": 0.24,
+      "retries": 0,
+      "ack_latency": 0.12787318229675293,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上市股票當沖資格(無券當沖)"
+    },
+    {
+      "symbol": "6108",
+      "direction": "SHORT",
+      "shares": 1000,
+      "zhang": 1,
+      "price": 34.1,
+      "sl": 33.45,
+      "tp": 25.7,
+      "pos_pct": 0.24,
+      "retries": 0,
+      "ack_latency": 0.10501551628112793,
+      "ack_code": 924,
+      "msg": "924",
+      "broker_msg": "[924] 新增智慧條件單失敗,原因:投資人未具有上市股票當沖資格(無券當沖)"
+    }
+  ],
+  "entry_slippage": [
+    {
+      "symbol": "6173",
+      "intended": 294.0,
+      "observed": 286.0,
+      "adverse_pct": 2.7210884353741496,
+      "after_open_sec": 2228.015725851059
+    },
+    {
+      "symbol": "6213",
+      "intended": 789.0,
+      "observed": 762.0,
+      "adverse_pct": 3.4220532319391634,
+      "after_open_sec": 2228.015725851059
+    },
+    {
+      "symbol": "6672",
+      "intended": 564.0,
+      "observed": 541.0,
+      "adverse_pct": 4.078014184397164,
+      "after_open_sec": 2228.015725851059
+    },
+    {
+      "symbol": "3105",
+      "intended": 523.0,
+      "observed": 540.0,
+      "adverse_pct": -3.2504780114722758,
+      "after_open_sec": 2228.015725851059
+    },
+    {
+      "symbol": "6278",
+      "intended": 290.0,
+      "observed": 285.0,
+      "adverse_pct": 1.7241379310344827,
+      "after_open_sec": 2228.015725851059
+    },
+    {
+      "symbol": "6108",
+      "intended": 32.15,
+      "observed": 33.5,
+      "adverse_pct": -4.199066874027999,
+      "after_open_sec": 2228.015725851059
+    }
+  ],
+  "trades": [
+    {
+      "time": "2026-10-28T09:37:08.017808",
+      "symbol": "3105",
+      "name": "穩懋",
+      "direction": "SHORT",
+      "tier": "q0.96/zt2.5/dd1.00/km1.0/kt2.0",
+      "shares": 2000,
+      "entry": 523.0,
+      "exit": 540.0,
+      "reason": "STOP_LOSS",
+      "pnl": -36317.34
+    },
+    {
+      "time": "2026-10-28T09:37:08.017925",
+      "symbol": "6108",
+      "name": "競國",
+      "direction": "SHORT",
+      "tier": "q0.95/zt1.0/dd1.00/km1.0/kt2.0",
+      "shares": 10000,
+      "entry": 32.15,
+      "exit": 33.5,
+      "reason": "STOP_LOSS",
+      "pnl": -14215.585000000014
+    },
+    {
+      "time": "2026-10-28T13:25:02.346763",
+      "symbol": "6173",
+      "name": "信昌電",
+      "direction": "SHORT",
+      "tier": "q0.98/zt2.5/dd1.00/km1.0/kt2.0",
+      "shares": 3000,
+      "entry": 294.0,
+      "exit": 288.5,
+      "reason": "FORCE_CLOSE",
+      "pnl": 14595.225
+    },
+    {
+      "time": "2026-10-28T13:25:02.347199",
+      "symbol": "6213",
+      "name": "聯茂",
+      "direction": "SHORT",
+      "tier": "q0.98/zt2.5/dd1.00/km1.0/kt2.0",
+      "shares": 1000,
+      "entry": 789.0,
+      "exit": 775.0,
+      "reason": "FORCE_CLOSE",
+      "pnl": 12295.24
+    },
+    {
+      "time": "2026-10-28T13:25:02.347461",
+      "symbol": "6672",
+      "name": "騰輝電子-KY",
+      "direction": "SHORT",
+      "tier": "q0.97/zt2.5/dd1.00/km1.0/kt2.0",
+      "shares": 1000,
+      "entry": 564.0,
+      "exit": 560.0,
+      "reason": "FORCE_CLOSE",
+      "pnl": 2774.84
+    },
+    {
+      "time": "2026-10-28T13:25:02.347687",
+      "symbol": "6278",
+      "name": "台表科",
+      "direction": "SHORT",
+      "tier": "q0.96/zt1.0/dd1.00/km1.0/kt2.0",
+      "shares": 3000,
+      "entry": 290.0,
+      "exit": 285.5,
+      "reason": "FORCE_CLOSE",
+      "pnl": 11618.115
+    }
+  ],
+  "checks": {
+    "order acceptance 100%": false,
+    "ack p90 < 2000ms": true,
+    "entry slippable [NOT TESTED - started after the open]": false
+  },
+  "blockers": [
+    "broker qualification missing: [924] 新增智慧條件單失敗,原因:投資人未具有上市股票當沖資格(無券當沖)",
+    "broker qualification missing: [924] 新增智慧條件單失敗,原因:投資人未具有上櫃股票當沖資格(無券當沖)",
+    "slippage unmeasurable: first price read 2228s after 09:00"
+  ],
+  "verdict": "not-live-ready"
+}

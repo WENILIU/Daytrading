@@ -2102,10 +2102,22 @@ class GapFadeAutoTrader:
                     self.log.info(f"      {sym} intended={intended} filled={fill} "
                                   f"slip={slip*100:+.3f}% edge={edge*100:+.3f}%")
         else:
-            self.log.warning("  ENTRY SLIPPAGE: not measurable - no fill price "
-                             "could be recovered from the OnFill args. The raw "
-                             "args are in this log; use them to fix the field "
-                             "index in _note_fill.")
+            accepted = [o for o in self.exec_stats.get("orders", [])
+                        if o.get("ack_code") == 0]
+            if not accepted:
+                # Nothing was accepted, so there is no fill to compare against.
+                # In paper mode that is the designed outcome (probe orders are
+                # priced so they cannot fill) - telling the reader to go fix a
+                # field index would chase a bug that does not exist.
+                self.log.info("  ENTRY SLIPPAGE: not measurable - no order was "
+                              "accepted, so there is no fill to compare. In paper "
+                              "mode this is expected; the slippage figure comes "
+                              "from the paper report's own section instead.")
+            else:
+                self.log.warning("  ENTRY SLIPPAGE: not measurable - no fill price "
+                                 "could be recovered from the OnFill args. The raw "
+                                 "args are in this log; use them to fix the field "
+                                 "index in _note_fill.")
         try:
             import json as _j
             p = Path(self.config.log_dir) / f"exec_report_{datetime.now().strftime('%Y%m%d')}.json"
