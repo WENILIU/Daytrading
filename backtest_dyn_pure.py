@@ -69,7 +69,7 @@ def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_
         pn = np.asarray(sub["p"].values, dtype=float)[o]
         pr = np.asarray(sub["entry"].values, dtype=float)[o]
         dv = np.asarray(sub["prev_turnover"].values, dtype=float)[o]
-        rem = eq; day_pnl = 0.0; n_exec = 0; gross = 0.0; biggest = 0.0
+        rem = eq; day_pnl = 0.0; n_exec = 0; gross = 0.0; biggest = 0.0; parts = []
         for i in range(len(w)):
             if w[i] <= 0:
                 continue
@@ -81,8 +81,10 @@ def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_
                 continue
             rem -= notional; day_pnl += notional * pn[i]; n_exec += 1
             gross += notional; biggest = max(biggest, notional)
+            if np.isfinite(dv[i]) and dv[i] > 0:
+                parts.append(notional / float(dv[i]))
         if collect is not None:
-            collect.append((dt, n_exec, biggest, gross))
+            collect.append((dt, n_exec, biggest, gross, parts))
         eq += day_pnl; eqs.append(eq); n_total += n_exec
     eq_s = pd.Series(eqs[1:], index=pd.to_datetime(sorted(yd)))
     ret = eq_s.pct_change().fillna(0)
