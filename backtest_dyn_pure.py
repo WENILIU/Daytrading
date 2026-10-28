@@ -30,18 +30,21 @@ rule = {"name": "t", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": No
 PART = 5.0  # participation factor: min_turnover = PART * equity  ->  0.25/PART = 5% participation
 
 
-def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_pct=0.0):
+def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_pct=0.0, collect=None):
     min_tv = PART * eq_start
     if floor is not None:
         min_tv = max(floor, min_tv)
     yd = [dt for dt in G_all if pd.Timestamp(dt).year == year]
     if len(yd) < 50:
         return None
-    eq = eq_start; eqs = [eq_start]; n_total = 0
+    eq = eq_start; eqs = [eq_start]; n_total = 0; n_univ = []
     for dt in sorted(yd):
         sub = G_all[dt]
         sub = sub[sub["prev_turnover"] >= min_tv]
+        n_univ.append(len(sub))
         if len(sub) == 0:
+            if collect is not None:
+                collect.append((dt, 0, 0.0, 0.0))
             eqs.append(eq); continue
         sub = sub.sort_values("pred", ascending=False)
         peak = max(eqs); cdd = (eq - peak) / peak
@@ -66,7 +69,7 @@ def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_
         pn = np.asarray(sub["p"].values, dtype=float)[o]
         pr = np.asarray(sub["entry"].values, dtype=float)[o]
         dv = np.asarray(sub["prev_turnover"].values, dtype=float)[o]
-        rem = eq; day_pnl = 0.0; n_exec = 0
+        rem = eq; day_pnl = 0.0; n_exec = 0; gross = 0.0; biggest = 0.0
         for i in range(len(w)):
             if w[i] <= 0:
                 continue
@@ -77,13 +80,17 @@ def run_year(eq_start, year, floor=None, use_k_model=True, use_ds=True, min_pos_
             if notional > rem:
                 continue
             rem -= notional; day_pnl += notional * pn[i]; n_exec += 1
+            gross += notional; biggest = max(biggest, notional)
+        if collect is not None:
+            collect.append((dt, n_exec, biggest, gross))
         eq += day_pnl; eqs.append(eq); n_total += n_exec
-    eq_s = pd.Series(eqs[1:])
+    eq_s = pd.Series(eqs[1:], index=pd.to_datetime(sorted(yd)))
     ret = eq_s.pct_change().fillna(0)
     yr_ret = (eq_s.iloc[-1] / eq_start - 1) * 100
     yr_dd = ((eq_s - eq_s.cummax()) / eq_s.cummax()).min() * 100
     shp = ret.mean() / ret.std() * np.sqrt(243) if ret.std() > 0 else 0
-    return eq_s.iloc[-1], yr_ret, yr_dd, shp, n_total, len(yd), min_tv, eq_s
+    return (eq_s.iloc[-1], yr_ret, yr_dd, shp, n_total, len(yd), min_tv, eq_s,
+            int(np.median(n_univ)) if n_univ else 0)
 
 
 def scenario_each_year(floor, label, use_k_model=True, use_ds=True, min_pos_pct=0.0):
@@ -97,11 +104,11 @@ def scenario_each_year(floor, label, use_k_model=True, use_ds=True, min_pos_pct=
         r = run_year(4_500_000, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
-        final, ret, dd, shp, nt, nd, mtv, _ser = r
+        final, ret, dd, shp, nt, nd, mtv, _ser, nu = r
         pnl = (final - 4_500_000) / 1e4
         tot += pnl
         rows.append((y, ret, dd, shp, nt / nd, pnl, mtv))
-        print(f"{y:<6} {ret:<8.1f} {dd:<7.1f} {shp:<7.2f} {nt/nd:<6.1f} {pnl:<9.1f} {mtv/1e4:<11.0f} {nt}")
+        print(f"{y:<6} {ret:<8.1f} {dd:<7.1f} {shp:<7.2f} {nt/nd:<6.1f} {pnl:<9.1f} {mtv/1e4:<11.0f} {nu}")
     print(f"\n  13y total PnL: {tot:,.0f} wan | avg/yr {tot/len(rows):,.0f} wan | avg ret {np.mean([r[1] for r in rows]):.1f}% | worst {min(r[1] for r in rows):.1f}% | worst MDD {min(r[2] for r in rows):.1f}%")
     print(f"  avg Sharpe {np.mean([r[3] for r in rows]):.2f}")
     return rows
@@ -112,28 +119,28 @@ def scenario_compound(floor, cap_eq, label, use_k_model=True, use_ds=True, min_p
     print("=" * 78)
     print(label)
     print("=" * 78)
-    print(f"{'Year':<6} {'Start(wan)':<11} {'Ret%':<8} {'End(wan)':<10} {'Withdraw':<10} {'CumWD':<8} {'MDD%':<7} {'minTV(wan)'}")
-    print("-" * 78)
+    print(f"{'Year':<6} {'Start(wan)':<11} {'Ret%':<8} {'End(wan)':<10} {'Withdraw':<10} {'CumWD':<8} {'MDD%':<7} {'minTV(wan)':<11} {'Univ/d'}")
+    print("-" * 88)
     eq = 4_500_000; wd = 0; _trace = []; _series = []
     for y in range(2014, 2027):
         r = run_year(eq, y, floor, use_k_model, use_ds, min_pos_pct)
         if r is None:
             continue
-        final, ret, dd, shp, nt, nd, mtv, ser = r
+        final, ret, dd, shp, nt, nd, mtv, ser, nu = r
         if cap_eq is None:
             _series.append(ser)
         w = 0
         if cap_eq is not None and final > cap_eq:
             w = final - cap_eq; final = cap_eq; wd += w
-        print(f"{y:<6} {eq/1e4:<11.0f} {ret:<8.1f} {final/1e4:<10.0f} {w/1e4:<10.0f} {wd/1e4:<8.0f} {dd:<7.1f} {mtv/1e4:.0f}")
-        _trace.append((y, eq, ret, final, dd, mtv))
+        print(f"{y:<6} {eq/1e4:<11.0f} {ret:<8.1f} {final/1e4:<10.0f} {w/1e4:<10.0f} {wd/1e4:<8.0f} {dd:<7.1f} {mtv/1e4:.0f} {nu}")
+        _trace.append((y, eq, ret, final, dd, mtv, nu))
         eq = final
     print(f"\n  trading capital {eq/1e4:,.0f} wan | withdrawn {wd/1e4:,.0f} wan | TOTAL {((eq+wd)/1e8):.2f} yi")
     yrs = len(_trace)
     if yrs:
         cagr = ((eq + wd) / 4_500_000) ** (1 / yrs) - 1
         peak = 4_500_000; mdd = 0.0
-        for y, e0, r, e1, dd, mtv in _trace:
+        for y, e0, r, e1, dd, mtv, nu in _trace:
             peak = max(peak, e1); mdd = min(mdd, (e1 - peak) / peak * 100)
         print(f"  PATH CAGR {cagr*100:.1f}% over {yrs}y | worst year {min(t[2] for t in _trace):.1f}% | path MDD {mdd:.1f}%")
         print(f"  final equity {eq/1e8:.2f} yi (no withdrawal)")
