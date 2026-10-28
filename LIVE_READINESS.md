@@ -879,7 +879,9 @@ Scan done in 1.3s (898 valid quotes)
 ### 執行方式
 
 ```bash
-python gap_fade_auto.py paper     # 只在交易日 08:55-13:40 之間有效，其他時間直接拒絕執行
+python gap_fade_auto.py paper     # 只在交易日 08:55-13:25 之間有效，其他時間直接拒絕執行
+#                                 #   13:25 之後強制平倉已執行，盤後送單券商回 code 0 但不驗證資格，
+#                                 #   會產生假性通過的報告（見 §11.6）
 ```
 
 時段保護是刻意加的：夜間跑會掃到今天收盤的舊開盤價、所有單都被拒，verdict 會誤判。
@@ -1147,3 +1149,53 @@ live 讀的 `equity_state.json` 到現在**仍然不存在**。§8.2 做的隔�
 ```
 看到第二行，才算證明 live 能看到自己智慧單的狀態。看不到，就是還有一個要修的地方，
 而且現在就知道、不用等到真金白銀下去。
+
+---
+
+### 11.6 盤後送單回 `ack_code=0`——acceptance 會**假性通過**（2026-10-28 13:37 實測）
+
+13:25 那份真正的報告跑完之後，13:37 又手動跑了一次 `paper`。它把
+`paper_report_20261028.json` **蓋掉**了，而且蓋上去的內容比較「好」：
+
+| | 13:25（盤中，真的） | 13:37（盤後，假的） |
+|---|---|---|
+| `ack_code` | 924 × 全部 | **0 × 全部** |
+| `broker_msg` | 「投資人未具有上市/上櫃股票當沖資格(無券當沖)」 | **空字串** |
+| acceptance 檢查 | FAIL（正確） | **PASS（錯的）** |
+
+**原因**：券商在收盤後收到委託，直接回 code 0、不帶訊息，**根本沒有去驗證當沖資格**。
+所以「全部被接受」這句話在盤後是**沒有內容的**。舊的檢查寫的是
+`not rejected and bool(codes)`，盤後一定過。
+
+這比 FAIL 更危險：FAIL 會叫你去修，假性 PASS 會讓你以為可以上實盤。
+
+**已修兩層**
+
+1. **門口的**：`paper` 的啟動窗口從 `08:55–13:40` 改成 **`08:55–13:25`**。
+   13:25 之後強制平倉已經執行，沒有東西可以再觀察，讓它進來只會產生垃圾報告。
+2. **報告裡的**（防禦第二層，因為「08:58 啟動但送單延到盤後」這種事也會發生）：
+   每張單現在記 `submit_ts`，報告用 `_in_trading_session()` 判斷送單時間。
+   只要有任何一張不在 `09:00–13:30`，acceptance 與 ack 延遲都標成
+   **`NOT TESTED - sent outside market hours`**，計入 FAIL，並寫進 `blockers`。
+
+**離線測試（兩個 case，同一組單，只差送單時間）**
+```
+CASE A - 13:37 送出
+  order acceptance: NOT TESTED. 3/3 orders were sent outside the trading session
+    (earliest 13:37:00). The broker answers code 0 after the close without checking
+    the day-trade qualification, so the 3 'accepted' orders above prove nothing.
+  [FAIL] order acceptance [NOT TESTED - sent outside market hours]
+  [FAIL] ack latency      [NOT TESTED - sent outside market hours]
+
+CASE B - 09:00:12 送出
+  [PASS] order acceptance 100%
+  [PASS] ack p90 < 2000ms
+```
+啟動窗口另外測了 8 個時間點（08:54/08:55/08:58/09:00/13:20/13:25/13:26/13:37），
+邊界兩側都對。測試檔：`_test_session_gate.py`、`_test_start_guard.py`。
+
+**被污染的報告已還原**（`git checkout trading_logs/paper_report_20261028.json`），
+repo 裡留的是 13:25 那份含 924 真實拒絕理由的。
+
+**一般化的教訓**：任何「券商回 code 0」的證據，先問一句「那時候市場有在開嗎」。
+券商的 code 0 只代表「我收下了」，不代表「我檢查過了」。

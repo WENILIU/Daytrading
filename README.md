@@ -97,7 +97,7 @@ python v13_export_model.py
 python gap_fade_auto.py now
 
 # 4. 上實盤前：用真實帳戶跑一整天但零風險（會送真單，但價格不可能成交）
-python gap_fade_auto.py paper    # 交易日 08:55-13:40 之間執行
+python gap_fade_auto.py paper    # 交易日 08:55-13:25 之間執行（盤後執行會被拒絕，見 LIVE_READINESS §11.6）
 
 # 5. 其他風險量測
 python v13_live_risk.py borrow     # 可借券覆蓋（已初步通過：各 gap 區間皆約 95%）

@@ -593,6 +593,19 @@ def _to_float(v) -> float:
         return 0.0
 
 
+def _in_trading_session(ts: float) -> bool:
+    """True when `ts` falls inside the TWSE continuous session (09:00-13:30).
+
+    Measured 2026-10-28: an order sent at 13:37, after the close, came back with
+    ack_code 0 and an empty message. The broker does not validate the day-trade
+    qualification outside the session, so an after-hours run "passes" the
+    acceptance gate without proving anything. The report has to know that.
+    """
+    import datetime as _dt
+    t = _dt.datetime.fromtimestamp(ts)
+    return (_dt.time(9, 0) <= t.time() <= _dt.time(13, 30)) and t.weekday() < 5
+
+
 def _parse_smart_key(message: str) -> str:
     """Pull the 條件單號 (smart-order key) out of a SendStockStrategyDayTrade ack.
 
@@ -2261,12 +2274,14 @@ class GapFadeAutoTrader:
                "shares": sig.shares, "zhang": zhang,
                "price": sig.entry_price, "sl": sig.sl_price, "tp": sig.tp_price,
                "pos_pct": round(getattr(sig, "_pos_pct", 0.0), 4),
-               "retries": 0, "ack_latency": None, "ack_code": None, "msg": ""}
+               "retries": 0, "ack_latency": None, "ack_code": None, "msg": "",
+               "submit_ts": None}
         self.exec_stats.setdefault("orders", []).append(rec)
         self.exec_stats["t_submit_first"] = min(self.exec_stats.get("t_submit_first", time.time()), time.time())
         try:
             t_sent = time.time()
             sig.submit_ts = t_sent
+            rec["submit_ts"] = t_sent
             bstrMessage, nCode = self.m_pSKOrder.SendStockStrategyDayTrade(
                 self.user_id, False, oOrder)
             sig.ack_ts = time.time(); rec["ack_latency"] = sig.ack_ts - t_sent
@@ -2903,10 +2918,15 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         opening prices, get every order rejected, and report a misleading verdict."""
         now = datetime.now()
         start = now.replace(hour=8, minute=55, second=0, microsecond=0)
-        stop = now.replace(hour=13, minute=40, second=0, microsecond=0)
+        # 13:25, not 13:40. A process started after the force-clear has nothing
+        # left to observe, and the broker still answers its orders with code 0
+        # after the close without checking the day-trade qualification - so an
+        # after-hours run used to print "order acceptance 100% PASS" out of
+        # nothing (measured 2026-10-28 13:37). Refuse at the door instead.
+        stop = now.replace(hour=13, minute=25, second=0, microsecond=0)
         if not (start <= now <= stop):
             print("PAPER MODE needs the live session. Current time "
-                  f"{now:%H:%M:%S} is outside 08:55-13:40.")
+                  f"{now:%H:%M:%S} is outside 08:55-13:25.")
             print("Run it on a trading day before 09:00 (it waits for the open),")
             print("or use `python gap_fade_auto.py scan` to test the feed only.")
             return 0
@@ -3290,9 +3310,40 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                     blockers.append(f"broker qualification missing: {key}")
                 else:
                     blockers.append(f"systemic order rejection x{n}: {key}")
-        checks.append(("order acceptance 100%", not rejected and bool(codes)))
+        # An order sent outside the session comes back ack_code 0 with an empty
+        # message (measured 2026-10-28 13:37, after the close). The broker does
+        # not check the day-trade qualification then, so treating that as a pass
+        # would turn "we never asked the market" into "the account works".
+        subs = [o.get("submit_ts") for o in self.exec_stats.get("orders", [])
+                if o.get("submit_ts")]
+        off_hours = [t for t in subs if not _in_trading_session(t)]
 
-        if acks:
+        if not codes:
+            checks.append(("order acceptance 100%", False))
+        elif off_hours:
+            when = datetime.fromtimestamp(min(off_hours)).strftime("%H:%M:%S")
+            self.log.warning(
+                f"  order acceptance: NOT TESTED. {len(off_hours)}/{len(codes)} "
+                f"orders were sent outside the trading session (earliest {when}). "
+                f"The broker answers code 0 after the close without checking the "
+                f"day-trade qualification, so the {len(codes)-len(rejected)} "
+                f"'accepted' orders above prove nothing about live behaviour.")
+            checks.append(("order acceptance [NOT TESTED - sent outside market hours]", False))
+            blockers.append(
+                f"acceptance unmeasurable: {len(off_hours)}/{len(codes)} orders "
+                f"sent outside 09:00-13:30 (earliest {when})")
+        else:
+            checks.append(("order acceptance 100%", not rejected and bool(codes)))
+
+        if acks and off_hours:
+            self.log.warning(
+                f"  submit->ack: NOT TESTED. Same reason - an after-hours ack is "
+                f"not the latency the exchange will give. The "
+                f"{len(acks)} readings below are printed for reference only.")
+            self.log.info(f"    (after-hours ack: p50 {st.median(acks)*1000:.0f}ms "
+                          f"max {max(acks)*1000:.0f}ms)")
+            checks.append(("ack latency [NOT TESTED - sent outside market hours]", False))
+        elif acks:
             self.log.info(f"  submit->ack: p50 {st.median(acks)*1000:.0f}ms "
                           f"p90 {pct(acks,0.9)*1000:.0f}ms max {max(acks)*1000:.0f}ms")
             checks.append(("ack p90 < 2000ms", pct(acks, 0.9) < 2.0))
