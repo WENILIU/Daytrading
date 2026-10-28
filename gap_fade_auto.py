@@ -74,6 +74,16 @@ FINLAB_NO_DAYTRADE_KEY = "day_trade_short_suspension"
 FINLAB_STALE_WARN_DAYS = 5
 
 DISPOSAL_PANEL = r"D:\gapfade_data\disposal_panel_full.pkl"
+# 全額交割股: a standing settlement status, not a temporary punishment like 處置, so it
+# lives in its own panel. True = the stock IS full-cash-delivery that day.
+FCD_PANEL = r"D:\gapfade_data\fcd_panel_full.pkl"
+# {date: [codes]} precomputed from the exchange's per-stock day-trade volume: the names
+# that recorded zero 當沖 volume in the previous DAYTRADE_DEAD_SESSIONS sessions. Used
+# only as a fallback when the broker's nDayTrade read is PARTIAL - measured 2026-10-28
+# it is a strict subset of what the broker blocks (128 of 221, zero false positives),
+# so applying it can only ever drop names the broker would have refused anyway.
+DAYTRADE_DEAD_LIST = r"D:\gapfade_data\daytrade_dead_list.pkl"
+DAYTRADE_DEAD_STALE_WARN_DAYS = 5
 
 TWSE_PUNISH_URL = "https://www.twse.com.tw/announcement/punish"
 TPEX_DISPOSAL_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/disposal"
@@ -324,8 +334,89 @@ def _from_panel(today) -> set:
     return set()
 
 
+def _fcd_from_panel(today) -> set:
+    """全額交割股 for today from the cached exchange panel.
+
+    Full-cash-delivery names cannot be day traded. Measured 2026-10-28: all 29 of
+    today's sit inside the broker's nDayTrade=0 bucket, so the 09:00 gate already
+    covers them. This is the second line for the case where that read comes back
+    PARTIAL - without it those 29 would reach the exchange and be rejected there.
+
+    The status changes rarely, so falling back to the newest row is a usable answer;
+    the as-of date is logged anyway, because a months-old panel stops covering names
+    that were added since.
+    """
+    log = _log()
+    try:
+        import pandas as _pd
+        p = _pd.read_pickle(FCD_PANEL)
+        today = _pd.Timestamp(today)
+        asof = p.index[p.index <= today].max()
+        if asof is None:
+            log.warning(f"  FCD PANEL has no row on or before {today.date()}")
+            return set()
+        lag = (today - asof).days
+        row = p.loc[asof]
+        hit = {c for c in row.index if bool(row[c]) and _common_stock(c)}
+        note = "" if lag == 0 else f" (as-of {asof.date()}, {lag}d behind today)"
+        log.info(f"  全額交割股 from panel: {len(hit)} codes{note}")
+        return hit
+    except FileNotFoundError:
+        log.warning(f"  FCD PANEL MISSING: {FCD_PANEL} - the broker's nDayTrade gate "
+                    f"is the only thing covering 全額交割股 today.")
+    except Exception as exc:
+        log.warning(f"  FCD PANEL UNREADABLE: {type(exc).__name__}: {exc}")
+    return set()
+
+
+def _daytrade_dead_recent(today) -> set:
+    """Names the exchange recorded zero day-trade volume for, before today.
+
+    This is the fallback for the case where the broker's nDayTrade read comes back
+    PARTIAL: without it the session would apply no day-trade filter at all. It is
+    deliberately narrower than the broker's answer - it measures activity, not
+    permission - so it only ever removes names that were also refused. Measured
+    2026-10-28: 128 codes flagged, all 128 inside the broker's 221, zero false
+    positives; honouring it costs 14.5 pct of 13-year backtest PnL.
+
+    A stale list is worse than no list in one direction and better in the other, so
+    it is logged loudly either way: an old list can miss names that stopped being
+    traded last week, and it cannot know about names that started trading again.
+    """
+    log = _log()
+    try:
+        import pickle as _pk
+        import pandas as _pd
+        with open(DAYTRADE_DEAD_LIST, "rb") as fh:
+            blob = _pk.load(fh)
+        days = blob.get("days") or {}
+        asof = blob.get("asof")
+        today = _pd.Timestamp(today)
+        if not days or not asof:
+            log.warning("  DAY-TRADE DEAD LIST is empty - no fallback filter available")
+            return set()
+        lag = (today - _pd.Timestamp(asof)).days
+        if lag > DAYTRADE_DEAD_STALE_WARN_DAYS:
+            log.warning(
+                f"  DAY-TRADE DEAD LIST STALE: built from exchange data as of {asof}, "
+                f"{lag} days behind {today.date()}. Names that stopped being day traded "
+                f"after that date will NOT be filtered. Refresh with _dtvol_ship.py.")
+        key = max(k for k in days if _pd.Timestamp(k) <= today)
+        hit = {str(c) for c in days[key] if _common_stock(str(c))}
+        note = "" if key == str(today.date()) else f" (as-of {key})"
+        log.info(f"  Zero day-trade volume in the last {blob.get('sessions')} sessions: "
+                  f"{len(hit)} codes{note}")
+        return hit
+    except FileNotFoundError:
+        log.warning(f"  DAY-TRADE DEAD LIST MISSING: {DAYTRADE_DEAD_LIST} - a PARTIAL "
+                    f"nDayTrade read this session means no day-trade filter at all.")
+    except Exception as exc:
+        log.warning(f"  DAY-TRADE DEAD LIST UNREADABLE: {type(exc).__name__}: {exc}")
+    return set()
+
+
 def get_restricted_stocks() -> set:
-    """Codes that cannot be day-traded today (處置 + 暫停先賣後買當沖).
+    """Codes that cannot be day-traded today (處置 + 暫停先賣後買當沖 + 全額交割).
 
     Sources in priority order; the first that answers wins:
       1. finlab disposal_information + day_trade_short_suspension - both
@@ -350,11 +441,18 @@ def get_restricted_stocks() -> set:
         restricted = _from_panel(today)
     source_ok = bool(restricted)
 
+    # 全額交割 is a different rule from the three sources above (a standing settlement
+    # status, not a punishment), so it unions in regardless of which source answered.
+    fcd = _fcd_from_panel(today)
+    before = len(restricted)
+    restricted |= fcd
+
     # Always exclude known non-day-trade stocks
     restricted.update(["2330", "2317"])
 
     if source_ok:
-        log.info(f"  Restricted (cannot day-trade): {len(restricted)} codes")
+        log.info(f"  Restricted (cannot day-trade): {len(restricted)} codes, "
+                  f"{len(restricted) - before} of them from the 全額交割 panel")
     else:
         log.warning(
             f"  NO RESTRICTION SOURCE ANSWERED for {today}. Only the "
@@ -1034,8 +1132,9 @@ class Signal:
     zt_dist: float = 0.0
     prev_turnover: float = 0.0
     # -1 = unknown. From the broker's own quote struct (nDayTrade), see
-    # _read_day_trade_flags - it is the PRODUCT's permission, not this
-    # account's 924 qualification, so it is reported and not enforced.
+    # _read_day_trade_flags / _day_trade_block. It is the PRODUCT's permission,
+    # not this account's 924 qualification - both must hold, so this gates the
+    # order when the read was complete and is reported when it was not.
     day_trade: int = -1
     pred: float = 0.0
     pred_q: float = 0.0
@@ -1192,7 +1291,14 @@ class GapFadeAutoTrader:
         self.closed_trades: list[dict] = []
         self.running = False
         self.quote_lib = None
-        self.restricted_stocks = set()  # 處置股 (no day trading allowed)
+        self.restricted_stocks = set()  # 處置股/全額交割 (no day trading allowed)
+        # The gate in scan_signals reads these first; defaults keep every other path
+        # (paper, tests, a resumed session) from tripping on attributes that only the
+        # scan creates. Unknown means no gate, which is the safe direction.
+        self._day_trade_flags = {}
+        self._day_trade_complete = False
+        self._dt_dead = set()
+        self._dt_reject_detail = []
         self.market_gap = 0.0
         self.market_drawdown = 0.0
         self._logged_in = False
@@ -1552,6 +1658,7 @@ class GapFadeAutoTrader:
         total_valid = 0
         candidates = []
         self._nb_reject = 0
+        self._dt_reject_detail = []
         self.market_gap = 0.0
         gaps_for_market = []
 
@@ -1621,6 +1728,32 @@ class GapFadeAutoTrader:
             self.market_gap = 0.0
             self.log.warning("  Market gap unavailable -> using 0")
 
+        # The broker's product-level day-trade permission, read once for the whole
+        # candidate set BEFORE any signal is built. It has to happen here and not after
+        # scoring: position weights are allocated over the signal set, so a name dropped
+        # after weighting would silently change every other position. One pass over the
+        # quote cache costs 0.19s (measured 2026-10-28), so the 09:00 timeline does not
+        # move.
+        self._day_trade_flags = self._read_day_trade_flags(
+            [c["symbol"] for c in candidates])
+        _want_dt = {str(c["symbol"]) for c in candidates}
+        self._day_trade_complete = bool(_want_dt) and _want_dt <= set(self._day_trade_flags)
+        self.exec_stats["day_trade_flags"] = self._day_trade_flags
+        self.exec_stats["day_trade_coverage"] = [len(self._day_trade_flags), len(_want_dt)]
+        self.exec_stats["day_trade_enforced"] = bool(self._day_trade_complete)
+        self._dt_dead = set()
+        if _want_dt and not self._day_trade_complete:
+            self.log.warning(
+                f"  DAY-TRADE PERMISSION PARTIAL: resolved {len(self._day_trade_flags)}"
+                f"/{len(_want_dt)} candidate codes. Unknown is NOT 'allowed', so the "
+                f"broker gate is not applied and the narrower fallback takes over.")
+            self._dt_dead = _daytrade_dead_recent(datetime.now())
+        self.exec_stats["day_trade_rule"] = (
+            "broker nDayTrade" if self._day_trade_complete else
+            (f"zero day-trade volume fallback ({len(self._dt_dead)} codes)" if self._dt_dead
+             else "none - no day-trade filter applied"))
+        self.log.info(f"  Day-trade rule in force: {self.exec_stats['day_trade_rule']}")
+
         # Filter by adjusted gap
         signals = []
         for c in candidates:
@@ -1640,6 +1773,18 @@ class GapFadeAutoTrader:
             if direction == Direction.SHORT and self.borrowable_stocks is not None \
                     and c["symbol"] not in self.borrowable_stocks:
                 self._nb_reject += 1
+                continue
+
+            # Which name may not be day traded, and why. The broker's product permission
+            # is the authority when it answered; when it did not, the narrower exchange-
+            # volume fallback runs instead, because no filter at all is the worse error.
+            _why = (self._day_trade_block(direction, c["symbol"])
+                    if self._day_trade_complete else
+                    ("no day-trade volume in the last 20 sessions"
+                     if c["symbol"] in self._dt_dead else None))
+            if _why:
+                self._dt_reject_detail.append(
+                    (c["symbol"], str(getattr(direction, "value", direction)), _why))
                 continue
 
             signals.append(Signal(
@@ -1666,6 +1811,12 @@ class GapFadeAutoTrader:
             self.log.warning("  SHORT leg NOT filtered for lending quota (see above)")
         else:
             self.log.info(f"  Rejected SHORT for no lending quota (T-1): {self._nb_reject}")
+        self.exec_stats["day_trade_dropped"] = self._dt_reject_detail
+        if self._dt_reject_detail:
+            _sh = sum(1 for d in self._dt_reject_detail if d[1] == "SHORT")
+            self.log.info(f"  Rejected by the broker's day-trade permission: "
+                          f"{len(self._dt_reject_detail)} ({_sh} SHORT, "
+                          f"{len(self._dt_reject_detail) - _sh} LONG)")
 
 
         # v13: model scoring + pred_q filter. NO top-N cap, NO gap-size ranking.
@@ -2977,20 +3128,12 @@ class GapFadeAutoTrader:
                 self.log.info("No signals. Done.")
                 return
 
-            # The broker's own opinion on whether each signal may be day-traded.
-            # Reported, never enforced - see _read_day_trade_flags.
-            try:
-                _t0 = time.time()
-                flags = self._read_day_trade_flags([sig.symbol for sig in self.signals])
-                self.exec_stats["day_trade_wait_s"] = round(time.time() - _t0, 2)
-                self.exec_stats["day_trade_coverage"] = [
-                    len(flags), len({sig.symbol for sig in self.signals})]
-            except Exception as exc:
-                self.log.warning(f"  day-trade permission not read: {exc}")
-                flags = {}
+            # The permission was read inside scan_signals, before any position was
+            # weighted, and the gate already ran there. Here it only labels the
+            # surviving signals for the report.
+            flags = self.exec_stats.get("day_trade_flags") or {}
             for sig in self.signals:
                 sig.day_trade = int(flags.get(sig.symbol, -1))
-            self.exec_stats["day_trade_flags"] = flags
 
             # Second-resolution record of what was actually tradeable after the
             # open. Threaded, so entry and monitoring keep their timing.
@@ -3036,6 +3179,26 @@ class GapFadeAutoTrader:
             if want <= set(found):
                 return
 
+    def _day_trade_block(self, direction, symbol):
+        """Why the broker's product permission forbids this order, or None to allow it.
+
+        nDayTrade: 0 = neither direction, 1 = buy-then-sell only, 2 = sell-then-buy too.
+        A SHORT opens by selling, so it needs 2; a LONG opens by buying, so 1 is enough.
+        Unknown (-1) never blocks - the caller only calls this when the read was complete,
+        and unknown is not the same as forbidden.
+
+        The flag is honoured because it was checked against the exchange's own day-trade
+        volume (2026-10-28, last 20 sessions): 1,706 of 1,707 nDayTrade=2 codes traded
+        當沖 in every session, vs 11 of 123 nDayTrade=0 codes trading it at all. The
+        market itself does not day trade those names, so this is not a broker quirk.
+        """
+        v = int(self._day_trade_flags.get(str(symbol), -1))
+        if v == 0:
+            return "nDayTrade=0 不可當沖"
+        if v == 1 and str(getattr(direction, "value", direction)).upper() == "SHORT":
+            return "nDayTrade=1 只能先買後賣"
+        return None
+
     def _read_day_trade_flags(self, codes, budget_sec: float = 3.0,
                               poll: float = 0.5) -> dict:
         """Read nDayTrade for `codes` out of the broker's own quote cache.
@@ -3045,8 +3208,16 @@ class GapFadeAutoTrader:
         Measured 2026-10-28 after the close: populated for 1,928/1,928 codes in our
         universe, every row stamped with that day's trading date (not stale), and
         nDayTrade=1 matches the finlab 處置 list on 13 of 13 - the field means what the
-        manual says. 221 codes are 0 without being 處置 and are unexplained, which is why
-        this is reported and not used to drop signals.
+        manual says.
+
+        What the 0 bucket means, settled 2026-10-28 against the exchange's own data
+        (finlab intraday_trading, last 20 sessions): 218 of the 221 are absent from the
+        exchange's 得先賣後買當沖 table entirely, all 29 全額交割股 are inside it, and the
+        market really does not day trade them - 11 of 123 non-全額交割 codes had any
+        當沖 volume at all, vs 1,706 of 1,707 for the nDayTrade=2 codes. So the flag is
+        honoured, not just reported. Honouring it costs 10.6 pct of 13-year backtest PnL
+        (upper bound: today's snapshot applied to 13 years; the per-date 全額交割 part
+        alone costs 2.0 pct).
 
         The cache is not ready the instant EnterMonitor returns. Measured 2026-10-28
         16:11 against the real broker: straight after connect a 40-code request resolved
@@ -4266,10 +4437,17 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                                  "complete answer.")
             self.log.info(f"    SHORT signals the broker would not allow: {short_blocked} "
                           f"({short_blocked/len(sigs)*100:.1f}%)")
-            self.log.info("    reported, NOT filtered. nDayTrade=1 matched the finlab 處置 "
-                          "list 13/13 so the field is real, but 221 universe codes are 0 "
-                          "without being 處置 and are unexplained - dropping signals on an "
-                          "unexplained flag would be guessing, not filtering.")
+            _drop = self.exec_stats.get("day_trade_dropped") or []
+            _enf = bool(self.exec_stats.get("day_trade_enforced"))
+            self.log.info(f"    rule in force: {self.exec_stats.get('day_trade_rule', 'unknown')} "
+                          f"| gate {'ENFORCED before weighting' if _enf or _drop else 'NOT applied'}: "
+                          f"{len(_drop)} candidate signals dropped "
+                          f"({sum(1 for d in _drop if d[1] == 'SHORT')} SHORT, "
+                          f"{sum(1 for d in _drop if d[1] != 'SHORT')} LONG)")
+            self.log.info("    the flag is honoured because the exchange's own day-trade volume "
+                          "agrees with it (1,706/1,707 of nDayTrade=2 traded 當沖 every session "
+                          "in the last 20, vs 11/123 of nDayTrade=0). Measured cost of honouring "
+                          "it: -10.6 pct of 13-year backtest PnL.")
         else:
             self.log.info("  day-trade permission: NOT READ (the quote cache had not "
                           "warmed when the scan ran, or there were no signals). Unknown "
@@ -4348,7 +4526,9 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 "counts": {str(v): sum(1 for sg in (getattr(self, "signals", None) or [])
                                        if int(getattr(sg, "day_trade", -1)) == v)
                            for v in (2, 1, 0, -1)},
-                "enforced": False,
+                "enforced": bool(self.exec_stats.get("day_trade_enforced", False)),
+                "dropped": [list(d) for d in
+                              (self.exec_stats.get("day_trade_dropped") or [])],
                 "meaning": "0=不可當沖 1=只能先買後賣 2=也可先賣後買; product permission, "
                            "not this account's 924 qualification",
             },
