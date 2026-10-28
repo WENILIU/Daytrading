@@ -997,3 +997,22 @@ ack 全部在 0.3 秒內回來，和 §3 的結論一致。真正的阻斷只有
    已在開盤後 >60 秒，報告直接標 **NOT TESTED** 並說明要 09:00 前啟動才能測，
    而不是把「我 09:06 才啟動」當成策略的失敗。今天的 +3~5% adverse 就是這個
    假象（6 分鐘的漂移，不是 10 秒的延遲），不要拿它去改策略。
+
+
+### 11.3 沒有 API 可以問出「當沖資質」（已查證，免得再找一遍）
+
+直覺上應該在 08:55 就用 API 問出资質、沒開通就不要跑。查完的結論是**問不到**：
+
+| 查法 | 結果 |
+|---|---|
+| `ISKOrderLib` 全部 155 個方法，比對 qualif / auth / right / permiss / enable / authority / prop / daytrade / risk / sign / margin | 只有 `GetFutureRights`、`GetRequestOverSeaFutureRight`（期權）、`GetMarginPurchaseAmountLimit`（融資額度）、`SendStockStrategyDayTrade`、`SendStockStrategyFTLDayTrade`。**沒有證券當沖資質查詢** |
+| `ISKCenterLib`（22）、`ISKReplyLib`（11）、`ISKQuoteLib`（50） | 與資質相關的只有 `SKCenterLib_SetAuthority`，那是切測試環境伺服器，不是查資質 |
+| `SendStockStrategyFTLDayTrade` 是不是另一條放空路徑 | SDK 附的 **20 份 docx 全部找不到 FTL** 的說明。未文檔化的方法不要拿去試實盤，失敗了連錯誤碼的意義都不知道 |
+
+所以「有沒有無券當沖資格」这件事，目前唯一可執行、且會明確回報的檢查就是
+**送一張出去讀 ack 代碼** —— 也就是 `paper` 模式在做的事。这也是為什麼
+`preflight.py` 裡沒有、也不該有這一項：它必須在盤中、用真單來測。
+
+實務做法：把 924 當成一個**會自己講去哪邊修的開盤檢查**。今天之後只要
+`paper_report_*.json` 的 `blockers` 出現 `broker qualification missing`，
+就是去群益申請，不是去改程式。
