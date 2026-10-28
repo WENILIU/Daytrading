@@ -305,6 +305,35 @@ check("a stale list is called out, because an old list quietly stops matching re
 G.DAYTRADE_DEAD_STALE_WARN_DAYS = _o2
 
 
+# --- the pre-open read, which keeps the cache walk off the 09:00 path ------
+import tempfile as _tf, os as _os
+t = trader()
+t.quote_lib = FakeQuoteLib({"2330": 2, "1213": 0, "1413": 1})
+_listp = Path(_tf.mkdtemp()) / "valid_stocks.txt"
+_listp.write_text("2330\n1213\n1413\n", encoding="utf-8")
+t.config.stock_list_path = _listp
+t._read_day_trade_flags_preopen()
+check("the pre-open read covers the whole stock list, not just today's candidates",
+      t._day_trade_flags == {"2330": 2, "1213": 0, "1413": 1}, str(t._day_trade_flags))
+check("it records how many codes it resolved, so a short answer cannot read as a full one",
+      t.exec_stats["day_trade_preopen_codes"] == 3
+      and len(t.exec_stats["day_trade_flags"]) == 3, str(t.exec_stats))
+
+t = trader()
+t.quote_lib = FakeQuoteLib({"2330": 2})
+t.config.stock_list_path = Path(_tf.mkdtemp()) / "absent.txt"
+t._read_day_trade_flags_preopen()
+check("a missing stock list is reported and leaves the flags empty (scan then asks)",
+      t._day_trade_flags == {} and any("skipped" in m for m in t._msgs), str(t._msgs))
+
+t = trader()
+t.quote_lib = None
+t.config.stock_list_path = _listp
+t._read_day_trade_flags_preopen()
+check("no quote feed still records an empty answer instead of leaving stale flags",
+      t._day_trade_flags == {}, str(t._day_trade_flags))
+
+
 print()
 ok = all(results)
 print(f"{sum(results)}/{len(results)} checks passed -> " + ("ALL OK" if ok else "FAILED"))

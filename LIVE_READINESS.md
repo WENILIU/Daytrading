@@ -1925,12 +1925,18 @@ nDayTrade  [限證券整股商品]可否當沖
 
 **新增的資料檔與刷新**（都會在過舊時大声 WARN，不會靜靜退化）：
 
-| 檔 | 來源 | 刷新 |
-|---|---|---|
-| `D:\gapfade_data\fcd_panel_full.pkl` | finlab `etl:full_cash_delivery_stock_filter` | `_fcd_build.py` |
-| `D:\gapfade_data\daytrade_dead_list.pkl` | finlab `intraday_trading:當日沖銷交易成交股數` → 近 20 _session_ 零量 | `_dtvol_build.py` + `_dtvol_ship.py` |
+一個進入點同時刷新兩個：`python refresh_executability_panels.py`（約 10 秒）。它會印出每個面板停在
+哪一天，任何一個抓不到就 exit 1——08:55 那個開盤排程現在會跑它，FAIL 不阻止啟動，但一定要在
+回報裡講出來（舊面板仍會回答，只是不再涵蓋這幾天新變成不可當沖的股票）。
 
-驗證：`_test_daytrade.py` **36 項**（新增：flag 0 擋兩向、flag 1 只擋 SHORT 不擋 LONG、
+| 檔 | 來源 | 備註 |
+|---|---|---|
+| `D:\gapfade_data\fcd_panel_full.pkl` | finlab `etl:full_cash_delivery_stock_filter` | 逐日原始旗標，True=是全額交割 |
+| `D:\gapfade_data\daytrade_dead_list.pkl` | finlab `intraday_trading:當日沖銷交易成交股數` | 預先算好的 `{日期: [零當沖量的代碼]}`，不是 60MB 原始框；08:58 載入 0.12 秒 |
+
+**權限讀取放在開盤前**（`_read_day_trade_flags_preopen`）。它是商品屬性、不會在 09:00 改變，而讀一次報價快取要 0.23 秒——放在掃描之後，就是每一筆進場前面多等 0.23 秒；對跳空股來說那段等待本身就是滑價。實測（`_smoke_pre.py`，盤後對真實券商）：1,928/1,928 檔、0.23 秒、分佈 0:221 / 1:13 / 2:1,694。開盤前沒讀到（程式晚啟動、快取沒暖）時，掃描會自己補讀一次，並在報告裡標明這次是補讀的。
+
+驗證：`_test_daytrade.py` **40 項**（新增：flag 0 擋兩向、flag 1 只擋 SHORT 不擋 LONG、
 未知永不擋、沒掃過就是 fail-open、全額交割 29 檔進 restricted 名單、備援清單是券商名單的
 子集、清單缺檔/過舊會 WARN 而不是靜靜不過濾），`_test_entry_curve.py` 31/31、
 `_test_scan_delay.py` 5/5、`test_paper_path.py` 13/13、`preflight.py` 0 FAIL、

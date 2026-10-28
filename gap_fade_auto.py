@@ -1728,23 +1728,29 @@ class GapFadeAutoTrader:
             self.market_gap = 0.0
             self.log.warning("  Market gap unavailable -> using 0")
 
-        # The broker's product-level day-trade permission, read once for the whole
-        # candidate set BEFORE any signal is built. It has to happen here and not after
-        # scoring: position weights are allocated over the signal set, so a name dropped
-        # after weighting would silently change every other position. One pass over the
-        # quote cache costs 0.19s (measured 2026-10-28), so the 09:00 timeline does not
-        # move.
-        self._day_trade_flags = self._read_day_trade_flags(
-            [c["symbol"] for c in candidates])
+        # The broker's product-level day-trade permission, applied BEFORE any signal is
+        # built: position weights are allocated over the signal set, so a name dropped
+        # after weighting would silently change every other position. Normally the flags
+        # were already read before 09:00 (_read_day_trade_flags_preopen); asking here
+        # instead would put a quote-cache walk in front of every entry.
         _want_dt = {str(c["symbol"]) for c in candidates}
-        self._day_trade_complete = bool(_want_dt) and _want_dt <= set(self._day_trade_flags)
+        if _want_dt and not self._day_trade_flags:
+            # No pre-open read happened - started after the open, or the cache never
+            # warmed. Ask once now, bounded, rather than skipping the gate.
+            self.log.warning("  day-trade flags were not pre-read; asking now "
+                             "(this delays entry by the cache walk)")
+            self._day_trade_flags = self._read_day_trade_flags(list(_want_dt))
+        # Coverage is counted over the CANDIDATES, not over the whole stock list the
+        # pre-open read covered - "resolved 1,900/12" would read as a bug otherwise.
+        _resolved_dt = len(_want_dt & {str(k) for k in self._day_trade_flags})
+        self._day_trade_complete = bool(_want_dt) and _resolved_dt == len(_want_dt)
         self.exec_stats["day_trade_flags"] = self._day_trade_flags
-        self.exec_stats["day_trade_coverage"] = [len(self._day_trade_flags), len(_want_dt)]
+        self.exec_stats["day_trade_coverage"] = [_resolved_dt, len(_want_dt)]
         self.exec_stats["day_trade_enforced"] = bool(self._day_trade_complete)
         self._dt_dead = set()
         if _want_dt and not self._day_trade_complete:
             self.log.warning(
-                f"  DAY-TRADE PERMISSION PARTIAL: resolved {len(self._day_trade_flags)}"
+                f"  DAY-TRADE PERMISSION PARTIAL: resolved {_resolved_dt}"
                 f"/{len(_want_dt)} candidate codes. Unknown is NOT 'allowed', so the "
                 f"broker gate is not applied and the narrower fallback takes over.")
             self._dt_dead = _daytrade_dead_recent(datetime.now())
@@ -3115,6 +3121,11 @@ class GapFadeAutoTrader:
 
         try:
             self.connect()
+            # The day-trade permission is a product attribute and does not change at
+            # 09:00, so it is read here, in the minutes we are already sitting idle.
+            # Reading it after the price scan would put a quote-cache walk in front of
+            # every entry, and on a gap stock that wait is entry slippage.
+            self._read_day_trade_flags_preopen()
             self._wait_until("09:00")
             # Anchor every latency measurement to the real 09:00:00, not to the
             # moment the scan happens to start.
@@ -3198,6 +3209,39 @@ class GapFadeAutoTrader:
         if v == 1 and str(getattr(direction, "value", direction)).upper() == "SHORT":
             return "nDayTrade=1 只能先買後賣"
         return None
+
+    def _read_day_trade_flags_preopen(self) -> None:
+        """Read the day-trade permission for the whole stock list before the open.
+
+        nDayTrade is a product attribute - it does not change when the market opens -
+        and one pass over the quote cache costs 0.19s (measured 2026-10-28). Doing it
+        here spends time we are already sitting idle; doing it after the price scan
+        would put that walk in front of every entry, and on a gap stock the wait IS
+        the slippage. Covering the whole stock list also lets the scan tell 'the cache
+        does not carry this code' from 'we never asked'.
+        """
+        # Set the empty answer first. Every early return below then leaves an explicit
+        # "no answer" rather than whatever happened to be in the attribute, and the scan
+        # re-asks exactly when it sees this.
+        self._day_trade_flags = {}
+        try:
+            codes = self._load_stock_list()
+        except Exception as exc:
+            self.log.warning(f"  day-trade pre-open read skipped: "
+                             f"{type(exc).__name__}: {exc}")
+            return
+        if not codes:
+            self.log.warning("  day-trade pre-open read skipped: stock list is empty")
+            return
+        t0 = time.time()
+        self._day_trade_flags = self._read_day_trade_flags(codes)
+        self.exec_stats["day_trade_flags"] = self._day_trade_flags
+        self.exec_stats["day_trade_wait_s"] = round(time.time() - t0, 2)
+        self.exec_stats["day_trade_preopen_codes"] = len(set(map(str, codes)))
+        self.log.info(
+            f"  Day-trade permission pre-read before the open: "
+            f"{len(self._day_trade_flags)}/{len(set(map(str, codes)))} codes resolved "
+            f"in {time.time() - t0:.2f}s")
 
     def _read_day_trade_flags(self, codes, budget_sec: float = 3.0,
                               poll: float = 0.5) -> dict:
