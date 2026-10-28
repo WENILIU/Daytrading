@@ -118,6 +118,21 @@ def _roc_compact(text):
         return None
 
 
+def _session_date(text) -> str:
+    """Normalise a feed session date to ISO 'YYYY-MM-DD'; '' when unparseable.
+
+    Fugle writes date='2026-10-28', TWSE MIS writes d='20261028' (both read from the
+    live APIs on 2026-10-28). scan mode decides "is the feed on today's session at
+    all" by comparing that field against today's ISO string, and it compared the RAW
+    strings - so on the TWSE fallback path the two formats can never be equal and a
+    genuinely live feed reported "FEED IS NOT ON <today>".
+    """
+    digits = "".join(ch for ch in str(text or "") if ch.isdigit())
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    return ""
+
+
 def _window_covers_today(text, today) -> bool:
     """True if a published disposal window contains today.
 
@@ -700,6 +715,105 @@ def spread_sample(seq, n: int) -> list:
         return items
     step = len(items) / n
     return [items[int(i * step)] for i in range(n)]
+
+
+# The entry-timing decision is asked about 30 seconds, and 1-minute bars resolve to
+# 60s - that is why this point has never been measured (LIVE_READINESS.md 11.15).
+WAIT_OFFSETS = (2, 5, 10, 15, 20, 30, 45, 60)
+
+
+def _q(vals, p):
+    """Nearest-rank percentile, same convention as the RISK1 summary, so the two
+    sets of numbers can be read side by side instead of looking different."""
+    v = sorted(vals)
+    if not v:
+        return None
+    return v[min(len(v) - 1, int(p * len(v)))]
+
+
+def _adverse_pct(direction, open_price, price):
+    """Cost of acting at `price` instead of at the exchange opening price, in pct,
+    signed so that POSITIVE IS WORSE.
+
+    A SHORT sells into the gap, so a lower price later hurts; a LONG buys the dip, so
+    a higher price later hurts. The same price path is a gain for one and a loss for
+    the other, which is why the wait cost has to be reported per direction and never
+    as one blended number.
+    """
+    d = getattr(direction, "value", direction)
+    d = str(d or "").upper()
+    if d not in ("SHORT", "LONG"):
+        return None
+    try:
+        o = float(open_price); p = float(price)
+    except (TypeError, ValueError):
+        return None
+    if o <= 0 or p <= 0:
+        return None
+    return (o - p) / o * 100.0 if d == "SHORT" else (p - o) / o * 100.0
+
+
+def _wait_curve_record(curve, rows, watch, open_ts, now_ts) -> int:
+    """Append one poll to the entry-timing curve; returns points added.
+
+    `watch` is {code: direction} for the names this strategy actually wants to trade
+    today. Sampling the whole market instead answers a question with no decision value:
+    its p90 is dominated by names that never print an opening price at all.
+    """
+    added = 0
+    offset = now_ts - open_ts
+    for r in rows or []:
+        code = str(r.get("c") or "")
+        if code not in watch:
+            continue
+        adv = _adverse_pct(watch[code], r.get("o"), r.get("z"))
+        if adv is None:
+            continue
+        rec = curve.setdefault(code, {"direction": str(watch[code].value
+                                                  if hasattr(watch[code], "value")
+                                                  else watch[code]).upper(),
+                                      "points": []})
+        if any(abs(off - offset) < 0.5 for off, _ in rec["points"]):
+            continue
+        rec["points"].append((round(offset, 2), adv))
+        added += 1
+    return added
+
+
+def _wait_curve_at(curve, offset) -> dict:
+    """What acting `offset` seconds after the open would have cost.
+
+    The price available for a name is its FIRST readable print at or after that
+    offset. A name that only becomes visible at +8s cannot be traded at +2s, and
+    counting it as tradeable at +2s is what made earlier visibility readings
+    optimistic.
+    """
+    out = {"short": [], "long": [], "unseen": 0}
+    for rec in curve.values():
+        after = [p for off, p in rec["points"] if off >= offset]
+        if not after:
+            out["unseen"] += 1
+            continue
+        out["short" if rec["direction"] == "SHORT" else "long"].append(after[0])
+    return out
+
+
+def _wait_curve_summary(curve, offsets=WAIT_OFFSETS) -> list:
+    """Per offset: how many wanted names were reachable, and the adverse move."""
+    rows = []
+    for off in offsets:
+        at = _wait_curve_at(curve, off)
+        s_, l_ = at["short"], at["long"]
+        allp = s_ + l_
+        med = lambda v: round(float(np.median(v)), 3) if v else None
+        rows.append({
+            "offset_sec": off, "n": len(allp),
+            "n_short": len(s_), "n_long": len(l_),
+            "unseen": at["unseen"],
+            "adverse_p50": med(allp), "adverse_p90": _q(allp, 0.9),
+            "short_p50": med(s_), "long_p50": med(l_),
+        })
+    return rows
 
 
 def parse_smart_strategy_report(row: str) -> dict:
@@ -1899,6 +2013,11 @@ class GapFadeAutoTrader:
                     "o": q.get("openPrice"),
                     "y": q.get("previousClose"),
                     "v": vol,
+                    # The entry-timing curve needs the price we can read NOW,
+                    # not the opening print. Fugle calls it closePrice; TWSE MIS
+                    # already answers a native z, so both sources end up shaped
+                    # the same for _wait_curve_record.
+                    "z": q.get("closePrice"),
                     "x": q.get("exchange", ""),
                     # RISK1 needs both of these. `date` says which session the
                     # feed is on (it keeps answering with the last trading day
@@ -2854,6 +2973,10 @@ class GapFadeAutoTrader:
                 self.log.info("No signals. Done.")
                 return
 
+            # Second-resolution record of what was actually tradeable after the
+            # open. Threaded, so entry and monitoring keep their timing.
+            self._start_entry_curve_recorder(self.signals)
+
             # Enter immediately at open (no confirmation wait)
             self.confirm_and_enter()
 
@@ -2873,6 +2996,53 @@ class GapFadeAutoTrader:
         finally:
             self.running = False
             self.disconnect()
+
+    def _start_entry_curve_recorder(self, signals, seconds: float = 60.0,
+                                   poll: float = 2.0):
+        """Sample today's signal set at second resolution for `seconds` after the open.
+
+        This closes the half of LIVE_READINESS.md 11.15 that is still an inference.
+        The live path scans ONCE at 09:00, and measured on 2026-10-28 only 36 pct of
+        that day's 138 signals had an opening print by +05s and 57 pct by +10s. The
+        cost of waiting to ~+30s for ~1.7x the trades was then estimated from 1-minute
+        bars, which cannot resolve anything inside 60s. Sampling the live feed on a
+        real open is the only way to get the number.
+
+        Runs in a daemon thread so entry and position monitoring keep their current
+        timing. It reads the same feed the scan uses, places no orders, and writes
+        into exec_stats["entry_curve"] for the end-of-day report.
+        """
+        import threading
+        watch = {}
+        for sig in signals:
+            d = getattr(sig.direction, "value", sig.direction)
+            watch[str(sig.symbol)] = str(d or "").upper()
+        watch = {k: v for k, v in watch.items() if v in ("SHORT", "LONG")}
+        if not watch:
+            return None
+        t_open = self.exec_stats.get("t_open") or time.time()
+        curve = self.exec_stats.setdefault("entry_curve", {})
+        codes = list(watch)
+
+        def loop():
+            end = time.time() + seconds
+            polls = 0
+            while time.time() < end:
+                try:
+                    rows, _src = self._batch_scan(codes)
+                except Exception as exc:      # a measurement must never break a session
+                    self.log.warning(f"  entry-curve recorder stopped: {exc}")
+                    return
+                _wait_curve_record(curve, rows, watch, t_open, time.time())
+                polls += 1
+                time.sleep(poll)
+            self.log.info(f"  entry-curve recorder: {polls} polls over {seconds:.0f}s, "
+                          f"{len(curve)}/{len(watch)} codes reached, "
+                          f"{sum(len(v['points']) for v in curve.values())} points")
+
+        th = threading.Thread(target=loop, name="entry-curve", daemon=True)
+        th.start()
+        return th
 
     def _hold_until_open_plus_delay(self):
         """Hold the scan until 09:00:00 + Config.scan_delay_sec.
@@ -3978,6 +4148,29 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             self.log.info("  entry slippability: not measured (no positions)")
             checks.append(("entry slippable", False))
 
+        curve = self.exec_stats.get("entry_curve") or {}
+        if curve:
+            self.log.info("  entry timing curve - what acting at +Ns after 09:00:00 "
+                          "would have cost, on today's signal set. Adverse is signed "
+                          "POSITIVE = WORSE than the exchange opening price.")
+            self.log.info("    +sec  reach  adverse_p50  adverse_p90   SHORT_p50    LONG_p50")
+            for r in _wait_curve_summary(curve):
+                if not r["n"]:
+                    cells = f"{'-':>12} {'-':>12} {'-':>10} {'-':>10}"
+                else:
+                    sp = f"{r['short_p50']:>10.3f}" if r["short_p50"] is not None else f"{'-':>10}"
+                    lp = f"{r['long_p50']:>10.3f}" if r["long_p50"] is not None else f"{'-':>10}"
+                    ap9 = r["adverse_p90"] if r["adverse_p90"] is not None else r["adverse_p50"]
+                    cells = f"{r['adverse_p50']:>12.3f} {ap9:>12.3f} {sp} {lp}"
+                self.log.info(f"    +{r['offset_sec']:<4} {r['n']:>5} {cells}")
+            self.log.info("      'reach' counts wanted names with a readable print AT OR AFTER "
+                          "that offset - a name that first prints at +8s is not tradeable at "
+                          "+2s. Read the SHORT/LONG columns against the per-trade edge "
+                          f"({EDGE_PER_TRADE:.3f}%) before changing scan timing (11.15).")
+        else:
+            self.log.info("  entry timing curve: NOT RECORDED (the recorder did not run "
+                          "this session, so the wait-vs-go question stays unmeasured)")
+
         if trades:
             pnls = [t.get("pnl", 0.0) for t in trades]
             wins = sum(1 for x in pnls if x > 0)
@@ -4040,6 +4233,9 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "scan_delay_applied": self.exec_stats.get("scan_delay_applied", False),
             "orders": self.exec_stats.get("orders", []),
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
+            "entry_curve": self.exec_stats.get("entry_curve", {}),
+            "entry_curve_summary": _wait_curve_summary(
+                self.exec_stats.get("entry_curve") or {}),
             "trades": trades,
             "checks": {k: bool(v) for k, v in checks},
             "smart_order_status": [
@@ -4118,7 +4314,7 @@ if __name__ == "__main__":
             by_ex = {}
             for r in named:
                 by_ex[r.get("x") or "?"] = by_ex.get(r.get("x") or "?", 0) + 1
-            dated = sum(1 for r in named if str(r.get("d")) == today_s)
+            dated = sum(1 for r in named if _session_date(r.get("d")) == today_s)
             with_open = sum(1 for r in named if _to_float(r.get("o")) > 0)
             with_ot = 0
             for r in named:

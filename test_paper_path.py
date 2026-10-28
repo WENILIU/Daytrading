@@ -53,6 +53,11 @@ SUITES = [
      "entry timing is a parameter that each run records, and a delay that has "
      "already passed is reported as NOT applied instead of letting a late-start "
      "slippage number be read as the strategy's"),
+    ("_test_entry_curve.py",
+     "the entry-timing curve prices acting at +Ns at the first print AT OR AFTER N "
+     "(a name visible at +8s is not tradeable at +2s), keeps SHORT and LONG apart "
+     "because the same path is a cost for one and a gain for the other, and reads "
+     "both feeds' session-date formats"),
 ]
 
 
