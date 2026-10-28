@@ -49,6 +49,10 @@ SUITES = [
      "the 09:00 quote-readiness probe samples the whole market, not the first 100 "
      "lines of a sorted file (ETFs + oldest sector), which is not the population "
      "the orders come from"),
+    ("_test_scan_delay.py",
+     "entry timing is a parameter that each run records, and a delay that has "
+     "already passed is reported as NOT applied instead of letting a late-start "
+     "slippage number be read as the strategy's"),
 ]
 
 

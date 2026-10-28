@@ -407,6 +407,16 @@ class Config:
     q1_tp_threshold = 0.85
     force_exit_time = "13:25"
 
+    # ===== 09:00 ENTRY TIMING =====
+    # The scan used to fire as soon as the feed answered, which is ~09:00:06-10.
+    # Measured 2026-10-28: at :10 only 57 pct of the day's signals have an opening
+    # print at all, 82 pct by :15, 96 pct by :30 (LIVE_READINESS.md 11.15).
+    # Waiting pays for the move instead: +0.132 pct/trade at 60s, +0.230 at 180s
+    # (wait_cost.py). Which side wins is NOT settled, so the delay is a parameter
+    # and every run records the value it used - rather than the entry time being an
+    # accident of how fast the feed happened to answer.
+    scan_delay_sec = 0.0
+
     # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
     position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
     pos_cap_pct = 0.25              # hard cap per name
@@ -2836,6 +2846,7 @@ class GapFadeAutoTrader:
             # moment the scan happens to start.
             self.exec_stats["t_open"] = self._parse_time("09:00").timestamp()
             self._wait_for_quotes(min_stocks=200, timeout_sec=10)
+            self._hold_until_open_plus_delay()
             self.scan_signals()
             self.exec_stats["t_scan_done"] = time.time()
 
@@ -2862,6 +2873,35 @@ class GapFadeAutoTrader:
         finally:
             self.running = False
             self.disconnect()
+
+    def _hold_until_open_plus_delay(self):
+        """Hold the scan until 09:00:00 + Config.scan_delay_sec.
+
+        Always records what was asked for and whether it was actually applied. A
+        process that started after the open cannot hold for a delay that has
+        already passed, and saying so is better than letting the slippage number
+        below be read as if it belonged to +N seconds.
+        """
+        delay = float(getattr(self.config, "scan_delay_sec", 0.0) or 0.0)
+        self.exec_stats["scan_delay_sec"] = delay
+        if delay <= 0:
+            self.exec_stats["scan_delay_applied"] = False
+            return
+        t_open = self.exec_stats.get("t_open") or time.time()
+        target = t_open + delay
+        now = time.time()
+        if now >= target:
+            self.log.warning(
+                f"  scan delay {delay:.0f}s NOT applied - it is already "
+                f"{now - t_open:.1f}s past 09:00:00. Any slippage measured this "
+                f"session belongs to that late start, not to +{delay:.0f}s.")
+            self.exec_stats["scan_delay_applied"] = False
+            return
+        self.log.info(f"  holding the scan until 09:00:00+{delay:.0f}s "
+                      f"({target - now:.1f}s from now). Entry timing is a measured "
+                      f"choice, see LIVE_READINESS.md 11.15")
+        time.sleep(target - now)
+        self.exec_stats["scan_delay_applied"] = True
 
     def _wait_until(self, time_str: str):
         """Wait until specified time"""
@@ -3925,6 +3965,12 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                           f"= {share:.0f}% of the {EDGE_PER_TRADE:.3f}% per-trade edge")
             self.log.info("    baseline from 2026 1-minute data: mean +0.098%, "
                           "p90 +1.408% -> a day near that is NORMAL, not a failure")
+            dly = self.exec_stats.get("scan_delay_sec") or 0.0
+            if dly:
+                self.log.info(f"    measured with scan_delay_sec={dly:.0f}s "
+                              f"(applied={self.exec_stats.get('scan_delay_applied')}) "
+                              "- this number belongs to that entry time, not to the "
+                              "strategy in general")
             checks.append((f"delay cost < 25% of the per-trade edge "
                            f"(raw adverse mean < {0.25*EDGE_PER_TRADE/NET_FROM_RAW:.3f}%)",
                            mean_adv < 0.25 * EDGE_PER_TRADE / NET_FROM_RAW))
@@ -3990,6 +4036,8 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({
             "date": datetime.now().isoformat(),
+            "scan_delay_sec": self.exec_stats.get("scan_delay_sec", 0.0),
+            "scan_delay_applied": self.exec_stats.get("scan_delay_applied", False),
             "orders": self.exec_stats.get("orders", []),
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
             "trades": trades,
