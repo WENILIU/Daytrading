@@ -451,6 +451,11 @@ class Config:
     # --- paper mode (see GapFadePaperTrader) ---
     paper_poll_sec = 10         # simulated-fill resolution; 22 names batch in 0.47s
     paper_probe_zhang = 1       # probe order size in ZHANG (nQty is zhang, not shares)
+    # If every probe order was rejected, nothing exists on the broker's side and
+    # the smart-order status path stays untested. One 現股買 canary (1 張, priced
+    # where it cannot fill) is what makes "accepted -> GetTSSmartStrategyReport"
+    # observable. It is a plumbing test, not a strategy trade.
+    paper_canary = True
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = _HERE / "equity_state.json"
 
@@ -800,6 +805,10 @@ class GapFadeAutoTrader:
         self.user_id = config.cust_cert_id
         self._replies: list[dict] = []
         self._report_rows: list[dict] = []
+        # OrderLib-side buffers. Smart-order state and the account equity arrive
+        # on OrderLib events, not on the Reply channel.
+        self._smart_reports: list[dict] = []
+        self._balance_reports: list[dict] = []
         self.yahoo = YahooQuoteClient()
         self.signals: list[Signal] = []
         self._yesterday_signals: set = set()
@@ -943,7 +952,17 @@ class GapFadeAutoTrader:
         else:
             self.log.info("Certificate verified OK")
 
-        # Register OrderLib events (OnAccount, OnOrderResult, OnFill, OnCancel)
+        # Register OrderLib events. The names below are the REAL ones, taken
+        # from the official sample's SKOrderLibEvent
+        # (PythonExample/order_service/Order.py:494-560). The previous handlers
+        # were called OnOrderResult / OnFill / OnCancel - none of those exist.
+        # comtypes binds handlers by name, so a wrong name is never called and
+        # never raises: across every log on this machine OnAccount fired 36 times
+        # while OnOrderResult / OnFill / OnCancel fired 0 times, including the
+        # 2026-10-26 session where six orders were accepted and got smart keys.
+        # There is no fill event at all. A smart day-trade order lives on the
+        # broker's server; its state is pulled with GetTSSmartStrategyReport and
+        # arrives through OnTSSmartStrategyReport.
         def make_order_event(trader_ref):
             class OLE:
                 def OnAccount(self_inner, *args):
@@ -960,23 +979,44 @@ class GapFadeAutoTrader:
                     except Exception as e:
                         trader_ref.log.warning(f"  [OnAccount] parse error: {e}")
                     return -1
-                def OnOrderResult(self_inner, *args):
-                    trader_ref.log.info(f"  [OrderResult] {args}")
-                    trader_ref._note_ack(str(args))
+
+                def OnAsyncOrder(self_inner, nThreadID, nCode, bstrMessage):
+                    # The real asynchronous order result. With bAsyncOrder=False
+                    # we already get the ack synchronously, so this is a second
+                    # witness rather than the primary path.
+                    raw = f"thread={nThreadID} code={nCode} msg={bstrMessage}"
+                    trader_ref.log.info(f"  [AsyncOrder] {raw}")
+                    trader_ref._note_ack(raw)
                     return -1
-                def OnFill(self_inner, *args):
-                    trader_ref.log.info(f"  [FILL] {args}")
-                    trader_ref._note_fill(str(args))
+
+                def OnTSSmartStrategyReport(self_inner, bstrData):
+                    # Where a day-trade smart order reports its state.
+                    row = str(bstrData or "")
+                    trader_ref._smart_reports.append(
+                        {"ts": datetime.now().isoformat(), "row": row})
+                    trader_ref.log.info(f"  [SMART REPORT] {row[:500]}")
                     return -1
-                def OnCancel(self_inner, *args):
-                    trader_ref.log.info(f"  [CANCEL] {args}")
+
+                def OnRealBalanceReport(self_inner, bstrData):
+                    # GetRealBalanceReport answers HERE, on the OrderLib events -
+                    # not on the Reply channel. Waiting on OnReplyMessage/OnNewData
+                    # is why the balance "never arrived within 6s" and was written
+                    # off as a session-hours restriction.
+                    text = str(bstrData or "")
+                    trader_ref._balance_reports.append(
+                        {"ts": datetime.now().isoformat(), "text": text})
+                    trader_ref.log.info(f"  [BALANCE] {text[:2000]}")
                     return -1
-                def OnOpen(self_inner, *args):
+
+                def OnStopLossReport(self_inner, bstrData):
+                    trader_ref.log.info(f"  [STOPLOSS REPORT] {str(bstrData)[:500]}")
                     return -1
             return OLE()
 
-        self._order_handler = comtypes.client.GetEvents(
-            self.m_pSKOrder, make_order_event(self))
+        order_event = make_order_event(self)
+        order_event._smart_reports = self._smart_reports
+        order_event._balance_reports = self._balance_reports
+        self._order_handler = comtypes.client.GetEvents(self.m_pSKOrder, order_event)
 
         # Get trading account
         self.m_pSKOrder.GetUserAccount()
@@ -1957,6 +1997,26 @@ class GapFadeAutoTrader:
     fill_raw: dict = {}
     exec_stats: dict = {}
 
+    def request_smart_report(self, date_str: str = "", kind: str = "DayTrade"):
+        """Ask the broker for the state of day-trade smart orders.
+
+        This is the only documented way to learn what happened to a smart order:
+        there is no fill event on this API. The answer arrives on
+        OnTSSmartStrategyReport and is collected in self._smart_reports.
+        Signature from the official sample StockSmartTrade.py:749 -
+        (IID, account, market, reportStatus, kind, date).
+        """
+        try:
+            n = self.m_pSKOrder.GetTSSmartStrategyReport(
+                self.user_id, self.account, "TS", 0, kind, date_str)
+            msg = self.m_pSKCenter.SKCenterLib_GetReturnCodeMessage(n)
+            self.log.info(f"  GetTSSmartStrategyReport(kind={kind}, "
+                          f"date='{date_str}') -> {msg}")
+            return n
+        except Exception as e:
+            self.log.warning(f"  GetTSSmartStrategyReport failed: {e}")
+            return None
+
     def _note_fill(self, raw: str):
         """Record fill time, and try to recover the fill price.
 
@@ -2867,13 +2927,26 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             self.log.warning(f"  GetRealBalanceReport failed: {e}")
 
     def _wait_for_timeout_free_balance(self):
-        # The host labels the cash report differently across versions, so match
-        # loosely and fall back to whatever arrives.
-        for keys in (("現金", "cash", "餘額", "balance"), ("913R", "918D"), ()):
-            r = self._wait_for_reply(keys, timeout_sec=2.0)
+        """GetRealBalanceReport answers on the OrderLib OnRealBalanceReport
+        event. The old code polled the Reply channel, which is a different
+        callback and never carried it - that is why this looked like a
+        session-hours restriction. Read the real channel first; keep the Reply
+        channel as a fallback in case some host version routes it differently.
+        """
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            if self._balance_reports:
+                b = self._balance_reports[0]
+                return {"ts": b["ts"], "text": b["text"]}
+            r = self._wait_for_reply(("現金", "cash", "餘額", "balance"),
+                                     timeout_sec=1.0)
             if r:
                 return r
+        if self._balance_reports:
+            b = self._balance_reports[0]
+            return {"ts": b["ts"], "text": b["text"]}
         return None
+
 
     def _wait_for_reply(self, keywords: tuple[str, ...] = (), timeout_sec: float = 6.0):
         """Block until the Reply channel delivers something (optionally matching a
@@ -2894,6 +2967,62 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                     return {"ts": d["ts"], "text": d["row"]}
             time.sleep(0.25)
         return None
+
+    def _send_canary(self):
+        """Exercise the accepted-order path when nothing was accepted.
+
+        Without it a day like 2026-10-28 (every short rejected with 924) leaves
+        zero orders on the broker's side, so GetTSSmartStrategyReport has nothing
+        to answer and the whole status/fill channel stays unverified going into
+        live. The canary is 1 張 現股買 at 跌停: it is accepted, it is visible in
+        the Capital App, it cannot fill, and the 13:20 time-clear removes it.
+        """
+        cands = [s for s in self.signals if s.direction == Direction.LONG]
+        if not cands:
+            cands = list(self.signals)
+        if not cands:
+            self.log.warning("  [CANARY] no candidates left, cannot test the "
+                             "accepted-order path")
+            return
+        # Cheapest 1 張 first: the point is a cheap, guaranteed-safe acceptance.
+        cands.sort(key=lambda s: (s.open_price or 0) * 1000)
+        sig = cands[0]
+        if sig.direction != Direction.LONG:
+            # The fallback exists only to get an order ACCEPTED, and only a
+            # 現股買 can clear the 無券當沖 wall. Work on a copy so the real
+            # signal keeps its direction for the simulated book.
+            import copy as _copy
+            sig = _copy.copy(sig)
+            sig.direction = Direction.LONG
+            sig.state = PositionState.PENDING
+        probe = self._probe_price(sig)
+        real_entry, real_shares = sig.entry_price, sig.shares
+        sig.entry_price = probe
+        sig.shares = self.config.paper_probe_zhang * 1000
+        self.log.info(f"  [CANARY] nothing was accepted today; sending 1 張 "
+                      f"{sig.symbol} 現股買 @ {probe} (cannot fill) purely to "
+                      f"prove the accepted-order + smart-report path")
+        try:
+            self._place_entry_order(sig)
+        finally:
+            sig.entry_price, sig.shares = real_entry, real_shares
+        accepted = [o for o in self.exec_stats.get("orders", [])
+                    if o.get("ack_code") == 0]
+        if accepted:
+            self.log.info(f"  [CANARY] accepted - smart order exists. Querying "
+                          f"its state; the answer arrives on "
+                          f"OnTSSmartStrategyReport.")
+            self.request_smart_report()
+            for _ in range(10):
+                if self._smart_reports:
+                    for r in self._smart_reports[-3:]:
+                        self.log.info(f"  [CANARY] smart report row: {r['row'][:400]}")
+                    break
+                time.sleep(1)
+            else:
+                self.log.warning("  [CANARY] order accepted but no smart report "
+                                 "row within 10s - the status channel is still "
+                                 "unproven. Re-check during the session.")
 
     def _paper_state_path(self) -> Path:
         p = self.config.equity_state_path
@@ -3021,6 +3150,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         # still existing.
         heartbeat_sec = 300.0
         next_beat = time.time() + heartbeat_sec
+        self._canary_done = False
 
         while self.running:
             now = datetime.now()
@@ -3050,6 +3180,16 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 next_beat = time.time() + heartbeat_sec
                 self.log.info(f"  [PAPER HEARTBEAT] {now:%H:%M:%S} "
                               f"open={len(open_sigs)} round_trip={fetch_sec*1000:.0f}ms")
+                # Second witness: ask the broker what it thinks our smart orders
+                # did. In paper mode the probe orders are rejected, so an empty
+                # report is the correct answer - what matters is that the channel
+                # is proven to deliver before anything is traded for real.
+                self.request_smart_report()
+                if (self.config.paper_canary and not self._canary_done
+                        and not any(o.get("ack_code") == 0
+                                    for o in self.exec_stats.get("orders", []))):
+                    self._canary_done = True
+                    self._send_canary()
                 for sig in open_sigs:
                     px = prices.get(sig.symbol)
                     if not px:

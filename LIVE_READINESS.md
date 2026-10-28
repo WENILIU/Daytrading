@@ -1097,3 +1097,53 @@ live 讀的 `equity_state.json` 到現在**仍然不存在**。§8.2 做的隔�
   「根本沒有單被接受」和「有成交但欄位沒解析出來」，前者直接說明這是預期行為。
 * 盤中監控加了 5 分鐘心跳。今天實測一輪取價 **24~34ms**（4 檔批次），
   這才是「能不能即時管理部位」的正面證據，而且現在可以从日誌查證，不用靠猜。
+
+
+### 11.5 我們的三個下單事件名稱根本不存在（2026-10-28 查證，live 的盲點）
+
+會去查這個是因為一句一直被忽略的日誌：**所有** session 的日誌加起來，
+`OnAccount` 觸發 36 次，而 `[OrderResult]`、`[FILL]`、`[CANCEL]` **0 次**——
+連 2026-10-26 那一次 6 張都被接受、拿到智慧單 key 的 session 也沒有。
+
+對到官方範例 `PythonExample/order_service/Order.py:494` 的 `SKOrderLibEvent`
+才發現原因：**comtypes 是按方法名稱綁定的，名字錯就不會呼叫，也不會報錯。**
+真實存在的 15 個事件裡沒有 `OnOrderResult`、沒有 `OnFill`、也沒有 `OnCancel`。
+
+| 我們註冊的 | 真實的 | 用途 |
+|---|---|---|
+| `OnOrderResult` | `OnAsyncOrder(nThreadID, nCode, bstrMessage)` | 非同步委託結果（我們用 `bAsyncOrder=False`，同步就拿到了，這裡只是第二個見證） |
+| `OnFill` | **不存在** | 智慧單在券商伺服器上執行，**沒有成交事件** |
+| `OnCancel` | 不存在（取消會走 `OnAsyncOrder`） | — |
+| — | `OnTSSmartStrategyReport(bstrData)` | **智慧單狀態/成交的來源**，要主動呼叫 `GetTSSmartStrategyReport(IID, account, "TS", 0, "DayTrade", date)` 才會送 |
+| — | `OnRealBalanceReport(bstrData)` | 淨值回報。原本在 Reply 通道等，等不到就被解讀成「時段限制」 |
+
+已改成真實名稱並接上 `_smart_reports` / `_balance_reports`。
+**對照測試通過**：改完之後再呼叫 `GetUserAccount()`，`OnAccount` 照樣觸發 →
+事件註冊機制本身是好的，之前純粹是名字錯。
+
+**這件事對 live 的意義**：智慧單送出之後，我們的程式**原本完全不會知道它後來怎麼了**
+——有沒有成交、成交在什麼價格、停損有沒有觸發。回測裡那個「實際成交價 vs 開盤價」
+的關鍵數字，在 live 會永遠量不到。這不是小問題，這是「能不能上實盤」的核心之一。
+
+**還沒證實的部分（誠實講）**：今天盤後實測，
+`GetTSSmartStrategyReport` 回 `SK_SUCCESS`，但 30 秒內四個通道都沒有資料。
+這**不能**當成失敗——今天 0 張單被接受，券商端本來就沒有東西可以回報。
+另外一次重疊查詢回 `SK_ERROR_QUERY_IN_PROCESSING`，說明這類查詢**一次只能一個**，
+連續發問會被擋。
+
+所以這條通道要等到**真的有一張單被接受**的那天才能證實。為了讓這一天不要變成
+「等到無券當沖核准之後才發現還有這裡沒通」，加了 canary：
+
+* 如果那天 0 張被接受，paper 會在第一次心跳時送 **1 張現股買、掛跌停**（不可能成交、
+  13:20 自動出清）的 canary，純粹把「被接受 → 智慧單狀態回報」這條路走通。
+* 離線測試已過：會挑最便宜的 LONG、以現股買掛跌停、送出後立刻查詢狀態並把回報
+  寫進日誌；沒有 LONG 時會複製一份改方向，**不會**動到模擬部位用的原始訊號。
+* 開關是 `Config.paper_canary`。
+
+**明天開盤後要看的兩行**
+```
+[CANARY] accepted - smart order exists. Querying its state...
+[SMART REPORT] <欄位>
+```
+看到第二行，才算證明 live 能看到自己智慧單的狀態。看不到，就是還有一個要修的地方，
+而且現在就知道、不用等到真金白銀下去。
