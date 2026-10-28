@@ -58,6 +58,9 @@ SUITES = [
      "(a name visible at +8s is not tradeable at +2s), keeps SHORT and LONG apart "
      "because the same path is a cost for one and a gain for the other, and reads "
      "both feeds' session-date formats"),
+    ("_test_daytrade.py",
+     "the broker's per-stock day-trade permission is reported per signal and per "
+     "direction, never silently enforced, and an unread flag is NOT read as allowed"),
 ]
 
 

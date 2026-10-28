@@ -1033,6 +1033,10 @@ class Signal:
     # --- v13 model / execution telemetry ---
     zt_dist: float = 0.0
     prev_turnover: float = 0.0
+    # -1 = unknown. From the broker's own quote struct (nDayTrade), see
+    # _read_day_trade_flags - it is the PRODUCT's permission, not this
+    # account's 924 qualification, so it is reported and not enforced.
+    day_trade: int = -1
     pred: float = 0.0
     pred_q: float = 0.0
     q1: float = 0.0
@@ -2973,6 +2977,21 @@ class GapFadeAutoTrader:
                 self.log.info("No signals. Done.")
                 return
 
+            # The broker's own opinion on whether each signal may be day-traded.
+            # Reported, never enforced - see _read_day_trade_flags.
+            try:
+                _t0 = time.time()
+                flags = self._read_day_trade_flags([sig.symbol for sig in self.signals])
+                self.exec_stats["day_trade_wait_s"] = round(time.time() - _t0, 2)
+                self.exec_stats["day_trade_coverage"] = [
+                    len(flags), len({sig.symbol for sig in self.signals})]
+            except Exception as exc:
+                self.log.warning(f"  day-trade permission not read: {exc}")
+                flags = {}
+            for sig in self.signals:
+                sig.day_trade = int(flags.get(sig.symbol, -1))
+            self.exec_stats["day_trade_flags"] = flags
+
             # Second-resolution record of what was actually tradeable after the
             # open. Threaded, so entry and monitoring keep their timing.
             self._start_entry_curve_recorder(self.signals)
@@ -2996,6 +3015,56 @@ class GapFadeAutoTrader:
         finally:
             self.running = False
             self.disconnect()
+
+    def _walk_day_trade_flags(self, found: dict, want: set) -> None:
+        """One pass of the quote cache, adding any wanted code not yet resolved."""
+        for market_no in (0, 1, 2, 3, 4, 5):
+            idx = 0
+            while idx < 200000:
+                p = sk.SKSTOCKLONG()
+                try:
+                    p, nCode = self.quote_lib.SKQuoteLib_GetStockByIndexLONG(
+                        market_no, idx, p)
+                except Exception:
+                    break
+                if nCode != 0:
+                    break
+                sym = str(p.bstrStockNo or "")
+                if sym in want and sym not in found:
+                    found[sym] = int(p.nDayTrade)
+                idx += 1
+            if want <= set(found):
+                return
+
+    def _read_day_trade_flags(self, codes, budget_sec: float = 3.0,
+                              poll: float = 0.5) -> dict:
+        """Read nDayTrade for `codes` out of the broker's own quote cache.
+
+        The manual documents it on the per-stock quote struct:
+          nDayTrade  0:不可當沖  1:可先買後賣現股當沖  2:也可先賣後買(無券當沖)
+        Measured 2026-10-28 after the close: populated for 1,928/1,928 codes in our
+        universe, every row stamped with that day's trading date (not stale), and
+        nDayTrade=1 matches the finlab 處置 list on 13 of 13 - the field means what the
+        manual says. 221 codes are 0 without being 處置 and are unexplained, which is why
+        this is reported and not used to drop signals.
+
+        The cache is not ready the instant EnterMonitor returns. Measured 2026-10-28
+        16:11 against the real broker: straight after connect a 40-code request resolved
+        8 codes, 1s later it resolved 40 of 40, and a full pass costs 0.19s. A PARTIAL
+        answer is the dangerous one - it would report real counts for a few signals and
+        unknown for the rest - so this retries until everything is resolved or the budget
+        expires, and the caller reports how long it waited.
+        """
+        want = {str(c) for c in codes}
+        if not want or not getattr(self, "quote_lib", None):
+            return {}
+        found = {}
+        deadline = time.time() + max(0.0, budget_sec)
+        while True:
+            self._walk_day_trade_flags(found, want)
+            if want <= set(found) or time.time() >= deadline:
+                return found
+            time.sleep(poll)
 
     def _start_entry_curve_recorder(self, signals, seconds: float = 60.0,
                                    poll: float = 2.0):
@@ -4171,6 +4240,41 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             self.log.info("  entry timing curve: NOT RECORDED (the recorder did not run "
                           "this session, so the wait-vs-go question stays unmeasured)")
 
+        sigs = getattr(self, "signals", None) or []
+        flags = self.exec_stats.get("day_trade_flags") or {}
+        if flags and sigs:
+            counts = {0: 0, 1: 0, 2: 0, -1: 0}
+            short_blocked = 0
+            for sig in sigs:
+                v = int(getattr(sig, "day_trade", -1))
+                counts[v] = counts.get(v, 0) + 1
+                d = str(getattr(sig.direction, "value", sig.direction)).upper()
+                if d == "SHORT" and v != 2:
+                    short_blocked += 1
+            self.log.info("  day-trade permission, read from the broker's own quote feed "
+                          "(nDayTrade). This is the PRODUCT's permission; the account's "
+                          "924 qualification is a separate thing and is still missing.")
+            cov = self.exec_stats.get("day_trade_coverage") or [0, 0]
+            self.log.info(f"    signals {len(sigs)} | 2=both directions {counts.get(2,0)} | "
+                          f"1=LONG only {counts.get(1,0)} | 0=neither {counts.get(0,0)} | "
+                          f"unknown {counts.get(-1,0)}")
+            self.log.info(f"    resolved {cov[0]}/{cov[1]} signal codes from the quote "
+                          f"cache after {self.exec_stats.get('day_trade_wait_s', 0)}s")
+            if cov[1] and cov[0] < cov[1]:
+                self.log.warning("    the cache was PARTIAL - the unknown bucket above is "
+                                 "unresolved, not 'allowed'. Do not read the counts as a "
+                                 "complete answer.")
+            self.log.info(f"    SHORT signals the broker would not allow: {short_blocked} "
+                          f"({short_blocked/len(sigs)*100:.1f}%)")
+            self.log.info("    reported, NOT filtered. nDayTrade=1 matched the finlab 處置 "
+                          "list 13/13 so the field is real, but 221 universe codes are 0 "
+                          "without being 處置 and are unexplained - dropping signals on an "
+                          "unexplained flag would be guessing, not filtering.")
+        else:
+            self.log.info("  day-trade permission: NOT READ (the quote cache had not "
+                          "warmed when the scan ran, or there were no signals). Unknown "
+                          "is not the same as 'all allowed'.")
+
         if trades:
             pnls = [t.get("pnl", 0.0) for t in trades]
             wins = sum(1 for x in pnls if x > 0)
@@ -4236,6 +4340,18 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_curve": self.exec_stats.get("entry_curve", {}),
             "entry_curve_summary": _wait_curve_summary(
                 self.exec_stats.get("entry_curve") or {}),
+            "day_trade_flags": self.exec_stats.get("day_trade_flags", {}),
+            "day_trade_coverage": self.exec_stats.get("day_trade_coverage", [0, 0]),
+            "day_trade_wait_sec": self.exec_stats.get("day_trade_wait_s", 0),
+            "day_trade_summary": {
+                "signals": len(getattr(self, "signals", None) or []),
+                "counts": {str(v): sum(1 for sg in (getattr(self, "signals", None) or [])
+                                       if int(getattr(sg, "day_trade", -1)) == v)
+                           for v in (2, 1, 0, -1)},
+                "enforced": False,
+                "meaning": "0=不可當沖 1=只能先買後賣 2=也可先賣後買; product permission, "
+                           "not this account's 924 qualification",
+            },
             "trades": trades,
             "checks": {k: bool(v) for k, v in checks},
             "smart_order_status": [
