@@ -1276,3 +1276,48 @@ n=1 不能當結論，所以現在報告每次都會把「第一張 vs 其餘 p5
 F（25 張全被 924 拒、無 canary）與 G（25 張被拒 + canary 被接受）。
 關鍵是 **G：canary 被接受的延遲不能拿來替策略單的 accept 路徑背書。**
 `_test_session_gate.py`、`_test_start_guard.py`、`_test_canary.py`、`_test_pre.py` 一併重跑，全過。
+
+---
+
+### 11.9 `_PRESTART` 防呆存在，但綁錯東西——今天那 -9,250 其實含兩筆憑空創造的停損
+
+報告裡有一段會警告「帶 `_PRESTART` 的結算是晚啟動造成的假結算，比較回測時要排除」。
+這個防呆**寫了，但今天沒生效**。證據就在 repo 那份報告裡：
+
+```
+3105 SHORT entry 523 -> exit 540  reason=STOP_LOSS  pnl -36,317   time 09:37:08.017
+6108 SHORT entry 32.15 -> exit 33.5 reason=STOP_LOSS pnl -14,216  time 09:37:08.017
+```
+
+兩筆的成交時間跟「我們第一次看到這些價格」是**同一瞬間**（`entry_slippage` 的
+`after_open_sec` 全部是 2228.0s，也就是 09:37:08）。價格在我們開始看之前就已經
+越過停損了，這是憑空創造的成交，應該標 `_PRESTART`。
+
+**為什麼沒標**：`late_start` 的條件寫成 `first_poll and (now - t_open) > 60`。
+`first_poll` 是**迴圈的第一次迭代**，不是「這個部位第一次被觀察到」。
+今天第一次輪詢有兩檔沒拿到價格，牠們真正的第一次觀察落在第二次迭代，
+那時候 `first_poll` 已經是 False → 防呆失效、警告也不會響。
+
+**金額影響**（同一份報告算出來的）：
+```
+book total as reported : -9,250
+FORCE_CLOSE (real)     : +41,283  (4 trades)
+untagged invented SL   : -50,533  (2 trades)
+```
+所以那天**能跟回測比的數字是 +41,283，不是 -9,250**。
+JSON 我沒有改——那是當天程式實際產出的證據，保留原樣，修正在這裡講。
+
+**已修**：改成**逐檔**追蹤（`sig._px_observed`）。
+條件是「這個部位**第一次被看到價格**的當下，已經離盤開超過 60 秒、而且價格已經越過某個門檻」
+→ 才算憑空創造、標 `_PRESTART`。之後的輪詢是真觀察，結算照樣算真的。
+
+**驗證**：`_test_prestart_per_symbol.py` 三個情境全過——
+1) 晚啟動 + 第一次輪詢沒拿到價格（就是今天的形狀）→ `STOP_LOSS_PRESTART`；
+2) 晚啟動 + 第一次就有價格 → 一樣標 `_PRESTART`；
+3) 正常在 09:00 前啟動 → **仍是真的 `STOP_LOSS`，不會被誤標**（迴歸保護）。
+`_test_pre.py`、`_test_gates.py`、`_test_canary.py`、`_test_session_gate.py`、
+`_test_start_guard.py` 一併重跑，全過。
+
+**對明天的意義**：只要 09:00 前啟動，`late_session` 就是 False，所有結算都是真的，
+模擬書可以直接跟回測比。萬一還是晚啟動，現在每一筆假結算都會被標出來、
+報告會明確叫你不要拿去比。

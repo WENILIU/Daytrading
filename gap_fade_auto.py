@@ -3206,8 +3206,14 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             # crossed. Settling such a position at the observed price invents a
             # fill that never happened, so it is settled at the level instead and
             # tagged PRESTART to keep it out of any comparison with the backtest.
-            late_start = first_poll and (
-                time.time() - self.exec_stats.get("t_open", time.time())) > 60
+            #
+            # This is deliberately NOT tied to first_poll. On 2026-10-28 the
+            # first poll returned no prices for two names, so their first real
+            # observation happened on a later iteration, late_start was already
+            # False, and two invented stop-losses (-50,533) went into the book
+            # untagged while the report's own _PRESTART warning stayed silent.
+            # The honest unit is "the first price ever seen for THIS position".
+            late_session = (time.time() - self.exec_stats.get("t_open", time.time())) > 60
             if first_poll:
                 self._measure_entry_slippage(prices)
                 first_poll = False
@@ -3250,6 +3256,11 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 if force:
                     self._mark_exit(sig, price, "FORCE_CLOSE")
                     continue
+                # First price ever observed for this position: if a level is
+                # already through at that instant, we never saw it get crossed.
+                first_px = not getattr(sig, "_px_observed", False)
+                sig._px_observed = True
+                invented = first_px and late_session
                 if sig.direction == Direction.SHORT:
                     hit_sl, hit_tp = price >= sig.sl_price, price <= sig.tp_price
                 else:
@@ -3257,12 +3268,12 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 # A poll that crosses both levels takes the stop: the intra-poll
                 # order is unknown, so assume the worse outcome.
                 if hit_sl:
-                    if late_start:
+                    if invented:
                         self._mark_exit(sig, sig.sl_price, "STOP_LOSS_PRESTART")
                     else:
                         self._mark_exit(sig, price, "STOP_LOSS")
                 elif hit_tp:
-                    if late_start:
+                    if invented:
                         self._mark_exit(sig, sig.tp_price, "TAKE_PROFIT_PRESTART")
                     else:
                         self._mark_exit(sig, price, "TAKE_PROFIT")
