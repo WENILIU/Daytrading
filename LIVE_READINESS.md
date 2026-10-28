@@ -324,7 +324,14 @@ TWSE MIS 保留為退路。完整來源比較與 SKCOM 的實測結論見 §7A�
 實例仍從 4,500,000 開始）。
 
 1. **因子面板時效（每天都要看）**：先跑 `python v13_factors.py --refresh`
-   （向 finlab VIP 抓最新日 K）。啟動日誌裡必須看到這一行且 lag 為 0 或 1：
+   （向 finlab VIP 抓最新日 K）。
+   ⚠️ **這一步只能在開盤日早上做，前一晚做沒有用**（2026-10-28 13:56 實測）：
+   當天收盤後立刻 refresh，`price store` 與 panel 仍然停在 **2026-10-27**，因為
+   finlab 的日線是收盤後一段時間才發布。面板需要的是 T-1（昨天）的日線，
+   而 preflight 的 `factor panel age` 要求 **lag ≤ 1**，所以「昨晚刷新過」到今天早上
+   一定又落后一天、直接 FAIL、整天就不跑了。結論：**把 refresh 放在 08:55 流程的
+   第一步**（25–40 秒，來得及在 09:00 前完成），不是等 preflight FAIL 才補。
+   啟動日誌裡必須看到這一行且 lag 為 0 或 1：
    `Factor panel as-of <日期> (lag 0d), turnover keys <N>`。
    若出現 `FACTOR PANEL STALE by Nd (> 10d). Feeding NaN factors...`，代表模型改餵 NaN
    （與回測對缺日期的處理一致），**當天不要上實盤**：同一引擎實測把面板欄位拿掉，
