@@ -503,9 +503,13 @@ class Config:
     gap_short_min = 0.015           # SHORT: adj_gap >= +1.5 pct
     gap_long_min = 0.05             # LONG:  adj_gap <= -5.0 pct
     min_price = 30                  # prev_close >= 30 TWD
-    # T-1 turnover floor is NOT a fixed amount: it is derived from current
-    # equity via min_turnover_factor (see _min_turnover_floor) so the
-    # participation rate stays 5 pct at any capital size.
+    # T-1 turnover floor is a fixed 10M, the same base the backtest applies
+    # (v13_build.py ptv >= 1e7). Impact is NOT handled by a floor that grows
+    # with equity: it is handled by capping one order at the amount the opening
+    # tape can absorb for that name (k_open x max_open_participation x T-1
+    # turnover), measured 2026-11-01 from the local 1-minute corpus. A floor
+    # written as a multiple of equity shrinks the universe as capital grows and
+    # costs 9 pct a year of return; a cap on the order does not.
     benchmark_no = "0050"           # opening-gap benchmark, observable at 09:00
 
     # ===== v13 MODEL (exported by v13_export_model.py) =====
@@ -561,10 +565,15 @@ class Config:
     max_per_trade_pct = 0.25  # dynamic: 25% of current equity (scales with compounding)
     max_lot_value_pct = 0.25  # dynamic: skip if 1 lot > 25% of equity (scales with capital)
     # Minimum T-1 turnover: dynamic, maintains 5% participation rate.
-    # Formula: min_turnover = 5 x equity (= max_position / 5%)
+    # Absolute T-1 turnover floor, same base as the backtest.
     # At 4.5M: 2250萬 | At 10M: 5000萬 | At 20M: 1億
     # Participation rate always <= 5% one-way, <= 10% round-trip (day trade).
-    min_turnover_factor = 5.0  # min_turnover = factor x equity
+    min_turnover_abs = 10_000_000  # T-1 turnover floor, matches v13_build ptv>=1e7
+    # Impact cap per order, as a share of what the name can actually trade at the
+    # open. k_open is the measured median of (opening value / T-1 turnover), so
+    # k_open x max_open_participation x T-1 turnover = 25 pct of the opening tape.
+    k_open = 0.1497
+    max_open_participation = 0.25
     # Operational safety net only, NOT a performance rule. There is no count limit in the
     # strategy: capital (zero margin) is the gate. Measured on 2014-2026 (count_cap.py):
     # 34 candidates/day pass the filters, 9.4 get funded, p99 = 22, max = 26. 30 therefore
@@ -2331,15 +2340,21 @@ class GapFadeAutoTrader:
                 skipped_lot_coarse += 1
                 continue
             target_value = min(pos_pct * budget, self.config.max_per_trade_pct * budget)
-            # Liquidity filter: dynamic 5% participation rate.
-            # min_turnover = 5 x equity. Scales with capital automatically.
+            # Impact cap: one order may take at most 25 pct of the opening tape.
+            # Replaces the old 5 x equity universe floor, which cut the trade
+            # count instead of the order size.
             t1tv = float(getattr(sig, "prev_turnover", 0.0) or 0.0)
-            min_tv = self._min_turnover_floor()
-            if t1tv > 0 and t1tv < min_tv:
-                self.log.info(f"  {sig.symbol}: T-1 turnover {t1tv/1e6:.0f}M < "
-                              f"min {min_tv/1e6:.0f}M (5% participation), SKIP")
+            fill_cap = self._open_fillable_cap(t1tv)
+            if lot_value > fill_cap:
+                self.log.info(f"  {sig.symbol}: 1 zhang {lot_value:,.0f} > "
+                              f"25% of opening tape {fill_cap:,.0f} "
+                              f"(T-1 {t1tv/1e6:.0f}M), SKIP")
                 skipped_impact_capped += 1
                 continue
+            if target_value > fill_cap:
+                self.log.info(f"  {sig.symbol}: notional {target_value:,.0f} capped to "
+                              f"25% of opening tape {fill_cap:,.0f}")
+                target_value = fill_cap
             shares = int(target_value / lot_value) * 1000
             if shares < 1000:
                 self.log.info(f"  {sig.symbol}: < 1 zhang after sizing, SKIP")
@@ -2388,8 +2403,8 @@ class GapFadeAutoTrader:
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
         if skipped_impact_capped:
-            self.log.info(f"  Skipped (T-1 turnover < {self.config.min_turnover_factor}x equity, "
-                          f"5 pct participation cap): {skipped_impact_capped}")
+            self.log.info(f"  Skipped (1 zhang > {self.config.max_open_participation:.0%} of "
+                          f"opening tape): {skipped_impact_capped}")
         if skipped_lot_coarse:
             self.log.info(f"  Skipped (1 zhang > {self.config.max_lot_value_pct*100:.0f}% of equity, "
                           f"lot too coarse): {skipped_lot_coarse}")
@@ -3098,13 +3113,29 @@ class GapFadeAutoTrader:
             self.log.warning(f"  Failed to save equity state: {e}")
 
     def _min_turnover_floor(self) -> float:
-        """Dynamic T-1 turnover floor = min_turnover_factor x current equity.
+        """Absolute T-1 turnover floor. Deliberately NOT a multiple of equity.
 
-        One-way participation stays 5 pct: max position is 25 pct of equity,
-        so 25 / 5 = 5 pct of the stock T-1 turnover. Scales with capital
-        (4.5M -> 2250wan, 10M -> 5000wan, 20M -> 1yi). No absolute floor.
+        It used to be 5 x equity, which is what made the strategy look like it
+        had no capacity problem: as the book grew, the universe shrank with it
+        and the trade count fell from 14 to 5 a day. Measured cost of that
+        floor: 87.4 pct a year becomes 78.4, and the drawdown gets worse
+        (-5.04 -> -5.21 pct). The real constraint is per order, not per name,
+        and _open_fillable_cap below is where it is applied.
         """
-        return self.config.min_turnover_factor * self._current_equity
+        return self.config.min_turnover_abs
+
+    def _open_fillable_cap(self, t1tv: float) -> float:
+        """Largest notional the opening tape can absorb for one name.
+
+        k_open (0.1497) is the measured median of opening value / T-1 dollar
+        turnover, so this is 25 pct of what the name actually traded in the
+        opening auction. T-1 is the only legal input at 09:00. The measured
+        entry slippage is near zero up to this participation and rises above it,
+        which is why the cap sits here and not at a round number.
+        """
+        if t1tv <= 0:
+            return float("inf")
+        return self.config.k_open * self.config.max_open_participation * float(t1tv)
 
     # ----------------------------------------------------------
     # MAIN LOOP

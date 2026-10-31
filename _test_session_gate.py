@@ -33,8 +33,18 @@ def build(submit_ts_list, ack_code=0):
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def ts_at(hh, mm, ss):
+def _session_date():
+    """The most recent weekday. These fixtures place orders inside 09:00-13:30,
+    and _in_trading_session also rejects weekends, so a Saturday or Sunday
+    `today` makes every order off-session and the gate cannot be exercised."""
     d = dt.date.today()
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
+def ts_at(hh, mm, ss):
+    d = _session_date()
     return dt.datetime(d.year, d.month, d.day, hh, mm, ss).timestamp()
 
 

@@ -5,20 +5,33 @@ per-day audit charts. It has already drifted apart three times (a shares/lots
 confusion, a cap applied after the lot count, a skipped status never assigned),
 so it lives here once and everyone else calls it.
 
-Rule R9, measured 2026-10-27 (see STRATEGY.md section 2, sizing lab):
+Rule R9, measured 2026-10-27, impact term corrected 2026-11-01 (see STRATEGY.md
+section 2, sizing lab):
   target = weight x capital x scale
   target = min(target, cap)                       # absolute notional per order
   target = min(target, dv_cap x T-1 turnover)     # impact cap; T-1 is the only
-                                                  # legal proxy at 09:00
+                                                  # legal proxy at 09:00. dv_cap =
+                                                  # k_open x 25 pct = 25 pct of the
+                                                  # opening auction, measured
   skip if 1 lot > floor_lot                       # lot granularity too coarse
   skip if 1 lot > dv_skip x T-1 turnover
   n = floor(target / lot)                         # whole lots only
   n = min(n, cash_left // lot)                    # zero margin
+
+min_turnover_factor is retired. It was 5.0, i.e. a floor of 5 x equity on the
+name's T-1 turnover, which was meant to hold participation at 5 pct. It does the
+opposite of an impact cap: as the book grows it removes names, so the trade count
+falls (14.4 -> 4.7 a day) instead of the order size. Measured on a 4.5M book it
+costs 9 pct a year and makes the drawdown worse (-5.04 -> -5.21 pct). The
+liquidity base is the fixed 10M in v13_build.py, which is not a multiple of
+capital and does not move with it.
 """
 import numpy as np
 
 # adopted for live trading
-R9 = {"name": "R9", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": None, "floor_lot_pct": 0.25, "dv_cap": None, "min_turnover_factor": 5.0}
+K_OPEN = 0.1497          # median opening value / T-1 dollar turnover, measured
+R9 = {"name": "R9", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": None,
+      "floor_lot_pct": 0.25, "dv_cap": K_OPEN * 0.25, "min_turnover_factor": None}
 R6 = {"name": "R6", "scale": 1.0, "cap": 1_000_000, "floor_lot": 250_000}
 R7 = {"name": "R7", "scale": 0.5, "cap": 1_000_000, "floor_lot": 250_000}
 FLOOR_ONLY = {"name": "floor", "scale": 1.0}

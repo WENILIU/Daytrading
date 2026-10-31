@@ -28,6 +28,16 @@ SMART_ROW = ("27478651,TS,20261028,TSE,913R,0438724,0000000,11,6108,S,8,0,7,2,0,
              "2026-10-29 13:20:00.000,1,0,0,0,0001-01-01 08:00:00.000,,[in], [out],")
 
 
+def _session_date():
+    """The most recent weekday. These fixtures place orders inside 09:00-13:30,
+    and _in_trading_session also rejects weekends, so a Saturday or Sunday
+    `today` makes every order off-session and the gate cannot be exercised."""
+    d = dt.date.today()
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    return d
+
+
 def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0,
           qual_first=None):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
@@ -40,7 +50,7 @@ def build(n_strategy, ack_code=0, at=(9, 0, 12), canary=False, smart_rows=0,
     t.closed_trades = []
     t._smart_reports = [{"ts": 0.0, "row": SMART_ROW}] * smart_rows
     t.exec_stats = {"orders": [], "entry_slippage": []}
-    ts = dt.datetime(*dt.date.today().timetuple()[:3], *at).timestamp()
+    ts = dt.datetime(*_session_date().timetuple()[:3], *at).timestamp()
 
     def add(i, code, is_canary):
         rec = {"symbol": str(1000 + i), "direction": "SHORT", "shares": 1000,
