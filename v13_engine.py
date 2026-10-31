@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 
 CAP0 = 4_500_000
 BP1, BP2, M1, M2, MP = 0.015, 0.045, 10.0, 2.5, 0.25
-COST = 0.00109
+COST = 0.00111  # 0.4 pct two-sided -> 0.2 pct/side x1.8 zhe (0.036) + day-trade tax 0.15 pct/2 (0.075)
 SLO = 0.04
 
 
@@ -116,7 +116,7 @@ def exit_of(direction, entry, hi, lo, cl, lu, ld, tk, tp):
     return cl, slp, "13:25 強制平倉", (cl - entry) / entry
 
 
-def run_backtest(capture=None, capital=CAP0, min_lot_value=0.0, min_weight=0.0, kmode="pred", tmode="on", sig="signals_v13.pkl", scale=1.0, min_range=0.0):
+def run_backtest(capture=None, capital=CAP0, min_lot_value=0.0, min_weight=0.0, kmode="pred", tmode="on", sig="signals_v13.pkl", scale=1.0, min_range=0.0, skip_dates=None):
     """capture: list of dates to record, or a (start,end) tuple, or None.
     capital: fixed account size for the C view. min_lot_value: skip stocks whose
     1 lot costs more than this. min_weight: skip designs below this weight."""
@@ -140,6 +140,12 @@ def run_backtest(capture=None, capital=CAP0, min_lot_value=0.0, min_weight=0.0, 
     curve = []
     got = {}
     for dt in sorted(G):
+        # A day-level no-trade gate. Callers must only pass dates decided on
+        # information available at 09:00 (T-1 turnover, opening prices, model score);
+        # anything else here is look-ahead. Skipped days produce no curve row, which
+        # is correct: flat days, not zero-return days.
+        if skip_dates is not None and pd.Timestamp(dt) in skip_dates:
+            continue
         sub = G[dt]
         cdd = (eq - peak) / peak
         rs = 0.12 if cdd < -0.012 else (0.3 if cdd < -0.006 else 1.0)

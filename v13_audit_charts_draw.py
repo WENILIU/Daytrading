@@ -3,7 +3,7 @@ import os
 import numpy as np, pandas as pd
 import matplotlib.pyplot as plt
 
-COST = 0.00109
+COST = 0.00111  # same as v13_engine.COST
 
 
 def panel(ax, r):
@@ -76,12 +76,22 @@ def grid(df, path, ttl, ncol=4):
 def draw(date, T, C, cv, out):
     row = cv.loc[pd.Timestamp(date)]
     tag = date.replace("-", "")
+    # The panels are drawn from C, which is the R9 book (participation floor and
+    # one-lot-too-big filter included). The engine row["C_*"] is a different book, so
+    # the title must not print one count and the other day return (it did: 7 筆 next to
+    # +0.723% on 2026-10-30, where 7 筆 is worth -0.026%).
+    from v13_engine import CAP0
+    own_yuan = float(C["盈虧(元)"].sum())
+    own_expo = float(C["成交金額(萬)"].sum()) * 1e4 / CAP0 * 100
     grid(C, os.path.join(out, "audit_grid_%s_450萬實際交易.png" % tag), ncol=2,
          ttl="Gap Fade v13 - %s  450 萬整張實際能下的 %d 筆，合計 %+.0f 元\n"
-             "策略設計面: %d 筆 / 曝險 %.0f%% / 當日 %+.3f%%      450 萬整張: %d 筆 / 曝險 %.1f%% / 當日 %+.3f%%\n"
+             "R9 現行下單規則（本圖這 %d 筆）: 曝險 %.1f%% / 當日 %+.3f%%\n"
+             "回測引擎 allocate（無參與率上限、無 1 張過大過濾，不是這本書）: %d 筆 / %+.3f%%\n"
+             "策略設計面: %d 筆 / 曝險 %.0f%% / 當日 %+.3f%%\n"
              "大盤開盤 Gap %+.2f%%，通過過濾的訊號 %d 個；淨值回撤 %.2f%% -> 倉位倍數 %.1f，30 日邊際倍數 %.1f" %
-             (date, len(C), C["盈虧(元)"].sum(), len(T), row["A_expo"] * 100, row["A_pnl"] * 100,
-              len(C), row["C_expo"] * 100, row["C_pnl"] * 100, row["market_ret"] * 100,
+             (date, len(C), own_yuan, len(C), own_expo, own_yuan / CAP0 * 100,
+              row["C_n"], row["C_pnl"] * 100,
+              len(T), row["A_expo"] * 100, row["A_pnl"] * 100, row["market_ret"] * 100,
               int(row["n_signals"]), row["cdd"] * 100, row["rs"],
               C["30日倍數"].iloc[0] if len(C) else float("nan")))
     grid(T.sort_values("序").head(12), os.path.join(out, "audit_grid_%s_top12.png" % tag), ncol=4,
@@ -101,7 +111,7 @@ def draw(date, T, C, cv, out):
     fig, axs = plt.subplots(2, 1, figsize=(13, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
     ea = (1 + cv["A_pnl"]).cumprod(); ec = (1 + cv["C_pnl"]).cumprod()
     axs[0].plot(ea.index, ea.values, color="navy", lw=1.1, label="A 策略設計面（發表版，無整張限制）")
-    axs[0].plot(ec.index, ec.values, color="darkorange", lw=1.1, alpha=.85, label="C 450 萬固定資金 + 整張")
+    axs[0].plot(ec.index, ec.values, color="darkorange", lw=1.1, alpha=.85, label="C 450 萬 + 整張（回測引擎 allocate 規則，非 R9）")
     axs[0].axvline(pd.Timestamp(date), color="red", ls="--", lw=1.2)
     axs[0].annotate(date, (pd.Timestamp(date), ea.iloc[-1]), xytext=(-90, -18),
                     textcoords="offset points", color="red", fontsize=10)

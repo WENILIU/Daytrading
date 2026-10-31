@@ -1,7 +1,7 @@
 import pandas as pd, numpy as np, pickle, time, warnings; warnings.filterwarnings("ignore")
 from sklearn.ensemble import HistGradientBoostingRegressor
 t0=time.time()
-COST=0.00109
+COST=0.00111  # same as v13_engine.COST
 d=pd.read_pickle("universe15_nola.pkl").reset_index(drop=True)
 def pnl(d,tp,sl):
     e=d["entry"].values; hi=d["day_high"].values; lo=d["day_low"].values; cl=d["day_close"].values

@@ -583,7 +583,7 @@ class Config:
     equity_state_path = _HERE / "equity_state.json"
 
     # --- Cost ---
-    cost_per_trade = 0.00109  # 0.2 pct x1.7 zhe + day-trade tax halved, per side
+    cost_per_trade = 0.00111  # 0.4 pct two-sided -> 0.2 pct/side x1.8 zhe + day-trade tax halved, per side
 
     # --- Fugle (real-time scanning) ---
     fugle_api_key = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="

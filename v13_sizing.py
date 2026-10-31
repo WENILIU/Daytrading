@@ -63,6 +63,8 @@ def skip_reason(rule, w, px, dv1=np.nan, capital=4_500_000):
     lot = px * 1000.0
     if rule.get("floor_lot") and lot > rule["floor_lot"]:
         return "1張市值過高"
+    if rule.get("floor_lot_pct") is not None and lot > rule["floor_lot_pct"] * capital:
+        return "1張市值超過單檔%d%%上限" % int(rule["floor_lot_pct"] * 100)
     if rule.get("dv_skip") is not None and np.isfinite(dv1) and dv1 > 0 and lot > rule["dv_skip"] * float(dv1):
         return "1張超過T-1成交額上限"
     tgt = w * capital
@@ -72,7 +74,7 @@ def skip_reason(rule, w, px, dv1=np.nan, capital=4_500_000):
         tgt = min(tgt, rule["cap_pct"] * capital)
     if rule.get("min_turnover_factor") is not None and np.isfinite(dv1) and dv1 > 0:
         if float(dv1) < rule["min_turnover_factor"] * capital:
-            return 0
+            return "T-1成交額低於淨值%d倍(參與率上限)" % rule["min_turnover_factor"]
     if rule.get("dv_cap") is not None and np.isfinite(dv1) and dv1 > 0:
         tgt = min(tgt, rule["dv_cap"] * float(dv1))
     if tgt < lot:

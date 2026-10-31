@@ -1,6 +1,6 @@
 import pandas as pd, numpy as np, warnings, time; warnings.filterwarnings("ignore")
 from sklearn.ensemble import HistGradientBoostingRegressor
-COST=0.00109
+COST=0.00111  # same as v13_engine.COST: 0.2 pct/side x1.8 zhe + day-trade tax halved
 d=pd.read_pickle("universe15_nola.pkl").reset_index(drop=True)
 print("universe",len(d),flush=True)
 def pnl(d,tp,sl):

@@ -1,7 +1,7 @@
 import pandas as pd, numpy as np, pickle, warnings; warnings.filterwarnings("ignore")
 CAP0=4_500_000
 BP1,BP2,M1,M2,MP=0.015,0.045,10.0,2.5,0.25
-def run(u,bpmul=1.0,cost=0.00109):
+def run(u,bpmul=1.0,cost=0.00111):
     u=u[u["pred_q"]>=0.20]
     tr={}
     for direc in ["SHORT","LONG"]:
@@ -10,7 +10,7 @@ def run(u,bpmul=1.0,cost=0.00109):
         for dt,x in zip(s["date"],s["t30"].values): tr[(dt,direc)]=x
     G={dt:sub for dt,sub in u.groupby("date")}
     ds={dt:(0.5 if (sub["direction"]=="SHORT").mean()>0.8 or (sub["direction"]=="SHORT").mean()<0.2 else 1.0) for dt,sub in G.items()}
-    dc=2*(cost-0.00109)
+    dc=2*(cost-0.00111)
     eq=CAP0; eqs=[CAP0]; dts=[]
     for dt in sorted(G):
         sub=G[dt]; peak=max(eqs); cdd=(eq-peak)/peak
