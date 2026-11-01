@@ -91,8 +91,14 @@ print("signals %d, blocked by executability %d" % (len(D), int(D["blocked"].sum(
 
 def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False,
-        cost_mode="measured", spread=SPREAD, gap_max_long=None):
+        cost_mode="measured", spread=SPREAD, gap_max_long=None,
+        part_delta=False, liq_ref=0.10, cap_pct=None):
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
+    # cap_pct is the per-order share of the book. Stage B showed the participation
+    # cap is not what limits order size, so the only remaining size knob is this one.
+    if cap_pct is not None:
+        rule["cap_pct"] = cap_pct
+        rule["floor_lot_pct"] = cap_pct
     # brake is (t1, s1, t2, s2): below t1 scale to s1, below t2 scale to s2.
     # None disables it. Note what pinning the book does to this rule: the book is
     # capped at CAP0 every day, so peak is always CAP0 and cdd is the cumulative
@@ -154,6 +160,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 gross -= SL_COST
             pred = notional / (K_OPEN * dv1) if (np.isfinite(dv1) and dv1 > 0) else np.nan
             gross -= 2 * COST
+            if part_delta and np.isfinite(dv1) and dv1 > 0:
+                # cost of THIS order's participation minus what the shipped cap would
+                # have produced. Zero unless the raised cap is what made it bigger.
+                p_new = notional / (K_OPEN * dv1)
+                gross -= slip_cost(p_new, 1.0) - slip_cost(min(p_new, liq_ref), 1.0)
             if cost_mode == "measured":
                 gross -= entry_cost(r["direction"], r["adj_gap"], spread)
             else:

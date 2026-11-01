@@ -20,7 +20,8 @@ import numpy as np
 import v13_target as T
 
 CAP0 = T.CAP0
-LIVE = ((-0.006, 0.30), (-0.012, 0.12))
+# 2026-11-02: the shipped brake shrinks to 50/25, not 30/12 (v16_search.py).
+LIVE = ((-0.006, 0.50), (-0.012, 0.25))
 BASE = dict(brake=LIVE, liq=0.10, gap_max=0.04, gap_max_long=0.08)
 LINE = 4_500_000
 

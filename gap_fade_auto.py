@@ -602,8 +602,18 @@ class Config:
     max_total_exposure = 1.00
     zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
     zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
-    dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
-    dd_th2 = 0.012; dd_scale2 = 0.12   # equity DD > 1.2 pct  -> x0.12
+    # The brake THRESHOLDS stay where they are; only how hard it shrinks changed.
+    # Measured 2026-11-02 (v16_search.py / v16_g.py, exposure pinned at 1.00 because
+    # the account has no financing): shrinking to 50/25 instead of 30/12 is worth
+    # +7.1 pct a year over 13 years and +5.0 pct over 2022-2026, and it RAISES the
+    # worst year from +19.6 to +25.2. Position MDD goes -3.98 -> -4.60, still inside
+    # the -5 line. It improves 2014-2021 (+52.9 -> +61.4), the window never used to
+    # pick anything, so this is not a fit to the recent years. Fully off: MDD -14.4,
+    # so the brake itself is doing real work - it is the depth of the cut that was
+    # wrong, not the rule. The grid between 50/25 and 60/35 is noise (52/26 measures
+    # worse than 55/28), so the safer side of it was taken.
+    dd_th1 = 0.006; dd_scale1 = 0.50   # equity DD > 0.6 pct  -> x0.50
+    dd_th2 = 0.012; dd_scale2 = 0.25   # equity DD > 1.2 pct  -> x0.25
     k_model_scale = 0.02            # k_model = clip(0.5 + pred/0.02, 0, 2)
     # k_model is OFF by default. Measured on the corrected universe (2026-10-27):
     # it adds no return (CAGR 167.8% vs 167.3%) and worsens MDD (-4.34% vs -4.59%),
