@@ -562,6 +562,20 @@ class Config:
     # accident of how fast the feed happened to answer.
     scan_delay_sec = 0.0
 
+    # ===== 進場價格用哪一個（路徑 A/B/C）=====
+    # 2026-11-01 實測（v13_entry_ab.py / v13_entry_limit.py）：在 09:00 掃描之後掛
+    # 一張「價格 = 開盤價」的限價單是三臂裡最差的 C 臂 —— 成交率 70-79%，而成交的
+    # 每筆 -0.43%，因為會回到開盤價的單正是先逆著我們走的那批（逆向選擇）。
+    # 路徑 B 改成在開盤一分鐘之後用當時可成交的價格進場、付實測的半價差：
+    #   13 年年均 +88.5%，2025 +91.6%，2026 +122.7%，部位 MDD -3.98%。
+    # 路徑 A（參與開盤競價，+103.2%）需要盤前指示價，由 preopen_probe.py 在
+    # 2026-11-02 08:44 量。在它成立之前，live 用 B。
+    entry_at_open = False           # True = 舊的 C 臂，留作對照
+    entry_delay_sec = 60.0          # 在 09:00:00 + 這個秒數定價進場
+    # 那是一張限價單，所以要掛在真的會成交的價格：買掛最佳賣價、賣掛最佳買價。
+    # 五檔讀不到時退回「最新價跨越 N 個 tick」，並在日誌標出是哪一種來源。
+    entry_fallback_ticks = 1
+
     # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
     position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
     pos_cap_pct = 0.25              # hard cap per name
@@ -2238,6 +2252,131 @@ class GapFadeAutoTrader:
                     out[str(q.get("symbol", ""))] = price
         return out
 
+    def _fetch_book(self, codes: list[str]) -> dict[str, dict]:
+        """Best bid / best ask / last for the symbols we are about to enter.
+
+        `_fetch_prices` keeps lastPrice and throws the book away. That is right for
+        the SL/TP monitor and wrong for pricing an entry: a LIMIT at lastPrice is a
+        coin flip, and the C arm is what a coin flip costs. The same endpoint returns
+        bids/asks (verified 2026-11-01 after hours, 5 levels each), so the entry can
+        be placed at the touch and actually trade. Best is taken by value, not by
+        position, so it does not depend on how the feed orders the levels.
+        """
+        out = {}
+        uniq = [c for c in dict.fromkeys(codes) if c]
+        if not uniq:
+            return out
+        session = self._fugle_session()
+        size = max(1, self.config.fugle_batch_size)
+        for i in range(0, len(uniq), size):
+            batch = uniq[i:i + size]
+            try:
+                r = session.get(self.config.fugle_batch_url,
+                                params={"symbol": ",".join(batch)}, timeout=10)
+                if r.status_code != 200:
+                    self.log.warning(f"  Fugle book batch {r.status_code}: "
+                                     f"{r.text[:100]}")
+                    continue
+                rows = r.json()
+            except Exception as exc:
+                self.log.warning(f"  Fugle book batch error: {exc}")
+                continue
+            for q in rows if isinstance(rows, list) else []:
+                sym = str(q.get("symbol", ""))
+                if not sym:
+                    continue
+
+                def lvl(levels, want_max):
+                    try:
+                        vals = [float(x.get("price") or 0) for x in (levels or [])]
+                    except (TypeError, ValueError, AttributeError):
+                        return 0.0
+                    vals = [v for v in vals if v > 0]
+                    if not vals:
+                        return 0.0
+                    return max(vals) if want_max else min(vals)
+
+                try:
+                    last = float(q.get("lastPrice") or 0)
+                except (TypeError, ValueError):
+                    last = 0.0
+                out[sym] = {"last": last, "bid": lvl(q.get("bids"), True),
+                            "ask": lvl(q.get("asks"), False), "ts": time.time()}
+        return out
+
+    def _entry_from_quote(self, sig, quotes: dict) -> tuple:
+        """A price the ticket can actually trade at, or why there is none.
+
+        Buy at the best ask, sell at the best bid - that is the marketable limit,
+        and it is what the backtest's half-spread charge stands for. The result is
+        snapped to a valid tick and kept inside the day's price limits. The cost
+        against the open is recorded per order so the measured ENTRY_COST table can
+        be checked against what the book really offered, instead of assumed.
+        """
+        q = quotes.get(sig.symbol) or {}
+        last = float(q.get("last") or 0)
+        bid = float(q.get("bid") or 0)
+        ask = float(q.get("ask") or 0)
+        long_side = sig.direction == Direction.LONG
+        touch = ask if long_side else bid
+        if touch > 0:
+            price, src = touch, "touch"
+        elif last > 0:
+            tick = get_tick_size(last) * max(1, int(self.config.entry_fallback_ticks))
+            price = round(last + tick, 2) if long_side else round(last - tick, 2)
+            src = "last_crossed"
+        else:
+            return 0.0, "no quote", 0.0
+        price = snap_to_valid_price(price)
+        up, down = calc_price_limits(sig.prev_close)
+        if price <= 0 or price > up or price < down:
+            return 0.0, f"price {price} outside limits {down}/{up}", 0.0
+        raw = ((price - sig.open_price) / sig.open_price) if sig.open_price else 0.0
+        adverse = raw if long_side else -raw
+        sig._entry_src = src
+        sig._entry_vs_open = adverse * 100
+        self.exec_stats.setdefault("entry_cost_vs_open", []).append(
+            {"symbol": sig.symbol, "direction": sig.direction.value,
+             "open": sig.open_price, "last": last, "bid": bid, "ask": ask,
+             "entry": price, "source": src, "adverse_pct": adverse * 100})
+        return price, "", adverse * 100
+
+    def _hold_until_entry_time(self) -> bool:
+        """Wait until 09:00:00 + entry_delay_sec before pricing any entry.
+
+        Records what was asked for and whether it was actually applied, same
+        discipline as _hold_until_open_plus_delay: a process started after the open
+        cannot price at +60s, and the log has to say so instead of letting the
+        entry prices be read as the +60s prices.
+        """
+        delay = float(getattr(self.config, "entry_delay_sec", 0.0) or 0.0)
+        self.exec_stats["entry_delay_sec"] = delay
+        t_open = self.exec_stats.get("t_open")
+        if not t_open:
+            # The delay is defined against 09:00:00. A mode that never recorded one
+            # (now/sim) has nothing to be late or early relative to, and sleeping the
+            # delay anyway would only make the dev loop slower while implying a timing
+            # that was never measured.
+            self.exec_stats["entry_delay_applied"] = False
+            self.log.info("  entry delay not applicable - this session has no "
+                          "09:00:00 anchor; pricing from the live book immediately")
+            return False
+        target = t_open + delay
+        now = time.time()
+        if now >= target:
+            self.exec_stats["entry_delay_applied"] = False
+            self.log.warning(
+                f"  entry delay {delay:.0f}s NOT applied - already "
+                f"{now - t_open:.1f}s past 09:00:00. The entry prices below belong "
+                f"to that late start, not to +{delay:.0f}s.")
+            return False
+        self.log.info(f"  pricing entries at 09:00:00+{delay:.0f}s "
+                      f"({target - now:.1f}s from now) - path B, the arm that was "
+                      f"measured to work; LIVE_READINESS.md 11.27")
+        time.sleep(target - now)
+        self.exec_stats["entry_delay_applied"] = True
+        return True
+
     def _fugle_batch_scan(self, stock_list: list[str]) -> list[dict]:
         """Batch-query Fugle `intraday/quotes?symbol=...` for the WHOLE market.
 
@@ -2374,6 +2513,27 @@ class GapFadeAutoTrader:
         skipped_impact_capped = 0
         skipped_lot_coarse = 0
         skipped_order_cap = 0
+        skipped_no_quote = 0
+
+        quotes = {}
+        if not self.config.entry_at_open:
+            # Path B. One batched book read for the whole signal set, at the entry
+            # time, before any sizing - sizing depends on the price, so the price has
+            # to be settled first. Doing it here rather than per order keeps the wait
+            # to one round trip (measured 0.47s for 22 symbols on the same call
+            # shape) and makes every order in the book see the same market.
+            self._hold_until_entry_time()
+            t_read = time.time()
+            quotes = self._fetch_book([s.symbol for s in self.signals])
+            took = time.time() - t_read
+            t_open = self.exec_stats.get("t_open") or time.time()
+            after_open = time.time() - t_open
+            self.exec_stats["entry_book_read"] = {
+                "wanted": len(self.signals), "got": len(quotes),
+                "sec": round(took, 3), "after_open_sec": round(after_open, 2)}
+            self.log.info(
+                f"  entry book: {len(quotes)}/{len(self.signals)} symbols in "
+                f"{took:.2f}s, at {after_open:.1f}s after 09:00:00")
 
         for sig in self.signals:
             # Operational cap: signals are sorted by pred_q desc, so everything after the
@@ -2385,8 +2545,19 @@ class GapFadeAutoTrader:
                 skipped_at_limit += 1
                 continue
 
-            # Use open price as entry (immediate execution at market open)
-            entry_price = sig.open_price
+            # Which price the ticket is priced at. entry_at_open is the legacy C arm
+            # and is kept only so a session can be compared against it.
+            if self.config.entry_at_open:
+                entry_price = sig.open_price
+                sig._entry_src = "open"
+                sig._entry_vs_open = 0.0
+            else:
+                entry_price, why, _vs_open = self._entry_from_quote(sig, quotes)
+                if entry_price <= 0:
+                    skipped_no_quote += 1
+                    self.log.info(f"  {sig.symbol}: no entry price at "
+                                  f"+{self.config.entry_delay_sec:.0f}s ({why}), SKIP")
+                    continue
 
             # ===== v13 sizing: base_pos x zt_mult x dd_scale x k_model x k_trail =====
             if sig.zt_dist < self.config.zt_bp1:
@@ -2481,7 +2652,9 @@ class GapFadeAutoTrader:
             limit_up, limit_down = calc_price_limits(sig.prev_close)
             self.log.info(
                 f"  ENTER {sig.symbol} {sig.direction.value} "
-                f"price={entry_price} shares={shares} tier={sig.tier} "
+                f"price={entry_price} [{getattr(sig, '_entry_src', 'open')}, "
+                f"vs open {getattr(sig, '_entry_vs_open', 0.0):+.2f}%] "
+                f"shares={shares} tier={sig.tier} "
                 f"SL={sig.sl_price}({getattr(sig, '_sl_pct', 0)*100:.1f}%) "
                 f"TP={sig.tp_price}({getattr(sig, '_tp_pct', 0)*100:.0f}%) | limit={limit_up}/{limit_down}")
 
@@ -2490,6 +2663,10 @@ class GapFadeAutoTrader:
             orders_placed += 1
 
         self.exec_stats["t_submit_last"] = time.time()
+        if skipped_no_quote:
+            self.log.warning(
+                f"  Skipped (no entry quote at "
+                f"+{self.config.entry_delay_sec:.0f}s): {skipped_no_quote}")
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
         if skipped_impact_capped:
@@ -4551,6 +4728,14 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             mean_adv = st.mean(slips)
             net = mean_adv * NET_FROM_RAW
             share = net / EDGE_PER_TRADE * 100
+            if not self.config.entry_at_open:
+                self.log.info("  anchor note: the number below is our intended price "
+                              "vs the next market price.")
+                self.log.info("    Under path B the intended price IS a market price, "
+                              "so near zero here is expected")
+                self.log.info("    and is not evidence about the entry. The entry cost "
+                              "against the open is the")
+                self.log.info("    entry price vs the open line below.")
             self.log.info(f"  entry slippability: n={len(slips)} | adverse p50 "
                           f"{st.median(slips):+.2f}% p90 {pct(slips,0.9):+.2f}% | "
                           f"filled worse than intended: {len(adverse)}/{len(slips)}")
@@ -4559,12 +4744,25 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                           f"= {share:.0f}% of the {EDGE_PER_TRADE:.3f}% per-trade edge")
             self.log.info("    baseline from 2026 1-minute data: mean +0.098%, "
                           "p90 +1.408% -> a day near that is NORMAL, not a failure")
+            ent = [float(x.get("adverse_pct", 0)) for x in
+                   self.exec_stats.get("entry_cost_vs_open", [])]
+            if ent:
+                self.log.info(f"  entry price vs the open (path B, n={len(ent)}): "
+                              f"p50 {st.median(ent):+.3f}% p90 {pct(ent,0.9):+.3f}% "
+                              f"mean {st.mean(ent):+.3f}%")
+                self.log.info("    this is the number the backtest charges as a "
+                              "measured ENTRY_COST table;")
+                self.log.info("    compare it against that table instead of "
+                              "assuming either one.")
             dly = self.exec_stats.get("scan_delay_sec") or 0.0
             if dly:
                 self.log.info(f"    measured with scan_delay_sec={dly:.0f}s "
                               f"(applied={self.exec_stats.get('scan_delay_applied')}) "
                               "- this number belongs to that entry time, not to the "
                               "strategy in general")
+            self.log.info(f"    entry mode: "
+                          f"{'open price (C arm)' if self.config.entry_at_open else 'quote at +' + format(float(self.config.entry_delay_sec), '.0f') + 's (path B)'} "
+                          f"(applied={self.exec_stats.get('entry_delay_applied')})")
             checks.append((f"delay cost < 25% of the per-trade edge "
                            f"(raw adverse mean < {0.25*EDGE_PER_TRADE/NET_FROM_RAW:.3f}%)",
                            mean_adv < 0.25 * EDGE_PER_TRADE / NET_FROM_RAW))
@@ -4697,6 +4895,11 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "date": datetime.now().isoformat(),
             "scan_delay_sec": self.exec_stats.get("scan_delay_sec", 0.0),
             "scan_delay_applied": self.exec_stats.get("scan_delay_applied", False),
+            "entry_mode": "open" if self.config.entry_at_open else "quote_at_delay",
+            "entry_delay_sec": self.exec_stats.get("entry_delay_sec", 0.0),
+            "entry_delay_applied": self.exec_stats.get("entry_delay_applied", False),
+            "entry_book_read": self.exec_stats.get("entry_book_read", {}),
+            "entry_cost_vs_open": self.exec_stats.get("entry_cost_vs_open", []),
             "orders": self.exec_stats.get("orders", []),
             "entry_slippage": self.exec_stats.get("entry_slippage", []),
             "entry_curve": self.exec_stats.get("entry_curve", {}),

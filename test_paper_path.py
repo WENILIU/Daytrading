@@ -31,6 +31,10 @@ SUITES = [
     ("_test_prestart_per_symbol.py",
      "a late-start exit is tagged _PRESTART per position, and a normal start "
      "still produces a genuine STOP_LOSS"),
+    ("_test_entry_quote.py",
+     "the entry is priced from the book at +Ns (buy at the ask, sell at the bid), a "
+     "missing quote skips the order instead of falling back to the open, and the cost "
+     "against the open is recorded - the C arm must not come back by accident"),
     ("_test_canary.py",
      "the canary picks the cheapest LONG and sends 1 張 現股買 at 跌停"),
     ("_test_pre.py",
