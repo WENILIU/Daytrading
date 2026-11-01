@@ -502,6 +502,18 @@ class Config:
     # ===== v13 SIGNAL (9:00, market-adjusted opening gap) =====
     gap_short_min = 0.015           # SHORT: adj_gap >= +1.5 pct
     gap_long_min = 0.05             # LONG:  adj_gap <= -5.0 pct
+    # Upper bound on the signal. Measured 2026-11-01 by re-walking the whole exit
+    # path from a 09:01 entry on 1,907 real orders (v13_entry_ab.py): the cost of
+    # getting in rises with the gap - a small-gap SHORT actually gets a BETTER price
+    # by waiting (-0.094 pct of notional) while a 7-10 pct gap SHORT pays +0.353,
+    # and that group is also the one that gets stopped out. So the large-gap tail is
+    # where the entry cost and the stop losses both live.
+    # Chosen on 2014-2021, validated on 2022-2026 (v13_target5.py / v13_gapbound.py):
+    # 2022-2026 goes from +95.0 pct to +104.2 pct a year and the position drawdown
+    # improves from -5.15 pct to -3.88 pct. The value is not load-bearing: anything
+    # from 0.03 to 0.08 behaves the same, and it only starts costing return below
+    # 0.03, where the strategy begins cutting its own edge.
+    gap_max = 0.06                  # skip |adj_gap| > 6 pct
     min_price = 30                  # prev_close >= 30 TWD
     # T-1 turnover floor is a fixed 10M, the same base the backtest applies
     # (v13_build.py ptv >= 1e7). Impact is NOT handled by a floor that grows
@@ -537,7 +549,13 @@ class Config:
     # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
     position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
     pos_cap_pct = 0.25              # hard cap per name
-    max_total_exposure = 1.00       # ZERO MARGIN: total notional <= equity
+    # 1.25, not 1.00. With the entry cost measured instead of modelled, zero margin
+    # tops out at +87.1 pct a year on 2022-2026 (v13_confirm.py); the 100 pct target
+    # needs a ceiling of 1.25x equity, i.e. a margin line of about 5,630,000 TWD.
+    # Observed maximum deployment on any day in 13 years is exactly the ceiling, so
+    # the borrowing is real but never exceeds it. Average deployment is 31 pct.
+    # Set back to 1.00 to trade zero margin at +87.1 pct / position MDD -4.48 pct.
+    max_total_exposure = 1.25
     zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
     zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
     dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
@@ -573,7 +591,12 @@ class Config:
     # open. k_open is the measured median of (opening value / T-1 turnover), so
     # k_open x max_open_participation x T-1 turnover = 25 pct of the opening tape.
     k_open = 0.1497
-    max_open_participation = 0.25
+    # 10 pct, not 25. Two independent searches (v13_target.py 2026-11-01, and the
+    # earlier dv/dv10 comparison in v13_onebook.py) put liq=0.10 at the same return
+    # as 0.25 with a better drawdown, and it is the only setting that stays inside
+    # -5 pct once the entry cost is the measured one rather than the old curve.
+    # The measured participation p90 falls from 10.2 pct to 6.8 pct.
+    max_open_participation = 0.10
     # Operational safety net only, NOT a performance rule. There is no count limit in the
     # strategy: capital (zero margin) is the gate. Measured on 2014-2026 (count_cap.py):
     # 34 candidates/day pass the filters, 9.4 get funded, p99 = 22, max = 26. 30 therefore
@@ -1695,6 +1718,7 @@ class GapFadeAutoTrader:
         total_valid = 0
         candidates = []
         self._nb_reject = 0
+        self._gap_reject = 0
         self._dt_reject_detail = []
         self.market_gap = 0.0
         gaps_for_market = []
@@ -1811,6 +1835,13 @@ class GapFadeAutoTrader:
             if direction is None:
                 continue
 
+            # The gap ceiling. Placed here, before the borrow and day-trade checks,
+            # so the rejection is attributed to the gap and not to whichever check
+            # happens to run second.
+            if abs(adj_gap) > self.config.gap_max:
+                self._gap_reject += 1
+                continue
+
             # Only SHORT needs a stock borrow. LONG is 現股買 and must not be
             # filtered here - that was a bug: it dropped valid LONG signals.
             if direction == Direction.SHORT and self.borrowable_stocks is not None \
@@ -1854,6 +1885,7 @@ class GapFadeAutoTrader:
             self.log.warning("  SHORT leg NOT filtered for lending quota (see above)")
         else:
             self.log.info(f"  Rejected SHORT for no lending quota (T-1): {self._nb_reject}")
+            self.log.info(f"  Rejected for |adj_gap| > {self.config.gap_max*100:.0f} pct: {self._gap_reject}")
         self.exec_stats["day_trade_dropped"] = self._dt_reject_detail
         if self._dt_reject_detail:
             _sh = sum(1 for d in self._dt_reject_detail if d[1] == "SHORT")

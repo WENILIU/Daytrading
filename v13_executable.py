@@ -48,6 +48,16 @@ SL_COST = 0.002053       # stop fill vs stop level, per stop-triggered trade
 # Bucket sizes: 1,094 / 213 / 115 / 107 / 57 / 25. The last two are thin, so the
 # tail is held flat at the 10-20 pct value instead of following the measured
 # 0.534 / 0.619 wiggle. x is the bucket upper edge, same convention as before.
+# KNOWN TO BE OPTIMISTIC (2026-11-01, v13_entry_ab.py / v13_target.py). This curve is
+# bucketed only by predicted participation, and predicted participation is about 2x
+# optimistic against the real first minute. Measured directly by re-walking the whole
+# exit path from a 09:01 entry on 1,907 real orders, the entry cost is +0.091 pct of
+# notional in price plus 0.105 pct of spread. Charging this curve instead understates
+# that by roughly 26 points of annual return, and it is close to a no-op by
+# construction: its negative value below 2 pct (65 pct of orders) cancels its positive
+# value above 10 pct (8 pct of orders). The measured, direction-and-gap-conditional
+# replacement is v13_target.ENTRY_COST, and the v14 parameters were chosen against it.
+# This table is left in place so the older scripts still reproduce their own numbers.
 CURVE = [(0.0, -0.00125), (0.02, -0.00125), (0.05, 0.00052),
          (0.10, 0.00409), (0.20, 0.00590), (1e9, 0.00590)]
 CURVE_OLD = [(0.0, -0.0002), (0.02, -0.0002), (0.05, 0.00038),
