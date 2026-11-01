@@ -103,6 +103,10 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     b1, b2 = (brake if brake is not None else (0.0, 0.0))
     book = float(CAP0); peak = float(CAP0); withdrawn = 0.0
     yearly = {}; worst_dd = 0.0; n_all = 0; brake_days = 0; expo = []; parts = []
+    # monthly[y, m] = [yuan, trades, winners]. The yearly book is what the headline
+    # numbers are quoted from, but a single year is too coarse to tell "the strategy
+    # decayed" from "one bad month". Same yuan, same filters, one level finer.
+    monthly = {}
     # deployment against the BOOK, not against the ceiling. This is the
     # number that decides whether margin is needed at all: if the maximum
     # stays under 100 pct the exposure ceiling only stops the capital check
@@ -157,6 +161,10 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
+            mk = (int(pd.Timestamp(d).year), int(pd.Timestamp(d).month))
+            mm = monthly.setdefault(mk, [0.0, 0, 0])
+            mm[0] += notional * gross; mm[1] += 1
+            mm[2] += 1 if notional * gross > 0 else 0
             dir_n[r["direction"]] += 1; dir_y[r["direction"]] += notional * gross
         book += yuan
         if book > CAP0:
@@ -167,7 +175,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         yearly[int(pd.Timestamp(d).year)] = yearly.get(int(pd.Timestamp(d).year), 0.0) + yuan
         expo.append((book * exposure - rem) / (book * exposure))
         expo_book.append((book * exposure - rem) / book)
-    return dict(yearly=yearly, mdd=worst_dd * 100, n=n_all,
+    return dict(yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
                 withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y)
