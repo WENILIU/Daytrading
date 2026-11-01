@@ -11,8 +11,21 @@ section 2, sizing lab):
   target = min(target, cap)                       # absolute notional per order
   target = min(target, dv_cap x T-1 turnover)     # impact cap; T-1 is the only
                                                   # legal proxy at 09:00. dv_cap =
-                                                  # k_open x 25 pct = 25 pct of the
-                                                  # opening auction, measured
+                                                  # k_open x 10 pct = 10 pct of the
+                                                  # opening auction. 25 pct was the
+                                                  # default until 2026-11-01; the
+                                                  # 18-combination sweep in
+                                                  # v13_onebook.py could not tell
+                                                  # the two apart on return
+                                                  # (22.2 vs 21.5 pct, inside the
+                                                  # whole-lot noise floor) while
+                                                  # p90 participation is 10.2 vs
+                                                  # 7.5 pct of the opening auction.
+                                                  # The lower one is the one whose
+                                                  # fill assumption is least
+                                                  # stretched, and "the backtest
+                                                  # matches what I actually get"
+                                                  # is the deciding criterion.
   skip if 1 lot > floor_lot                       # lot granularity too coarse
   skip if 1 lot > dv_skip x T-1 turnover
   n = floor(target / lot)                         # whole lots only
@@ -25,13 +38,19 @@ falls (14.4 -> 4.7 a day) instead of the order size. Measured on a 4.5M book it
 costs 9 pct a year and makes the drawdown worse (-5.04 -> -5.21 pct). The
 liquidity base is the fixed 10M in v13_build.py, which is not a multiple of
 capital and does not move with it.
+
+Re-measured 2026-11-01 with the book pinned at 4.5M so capital size is held
+constant and only the rule differs (v13_onebook.py --fast). It did not buy the
+zero gap it was chosen for: worst return (21.1 vs 22.2 pct) and worst book
+drawdown (-5.03 vs -4.93 pct) of the three rules. Zero gap comes from
+capital_cap plus one shared loop, not from the liquidity rule.
 """
 import numpy as np
 
 # adopted for live trading
 K_OPEN = 0.1497          # median opening value / T-1 dollar turnover, measured
 R9 = {"name": "R9", "scale": 1.0, "cap": None, "cap_pct": 0.25, "floor_lot": None,
-      "floor_lot_pct": 0.25, "dv_cap": K_OPEN * 0.25, "min_turnover_factor": None}
+      "floor_lot_pct": 0.25, "dv_cap": K_OPEN * 0.10, "min_turnover_factor": None}
 R6 = {"name": "R6", "scale": 1.0, "cap": 1_000_000, "floor_lot": 250_000}
 R7 = {"name": "R7", "scale": 0.5, "cap": 1_000_000, "floor_lot": 250_000}
 FLOOR_ONLY = {"name": "floor", "scale": 1.0}

@@ -598,12 +598,25 @@ class Config:
     # dd_scale is a function of the book's equity curve, so the account design
     # (keep profits / take them out) changes the strategy, and any backtest that
     # does not simulate the same design is describing a different account.
-    # Measured 2026-11-01 (v13_onebook.py, 2014-2026, all measured costs):
-    #   cap 450wan  wealth CAGR 22.2%  MDD -0.66%
-    #   cap 1yi     wealth CAGR 48.0%  MDD -3.09%   <- best inside -5 pct
-    #   no cap      wealth CAGR 68.3%  MDD -5.68%
+    # Measured 2026-11-01 (v13_onebook.py, 2014-2026, measured slippage curve,
+    # dv_cap 10 pct). Two risk columns, because they answer different questions:
+    #   book MDD  = the drawdown of the trading account, i.e. what the strategy
+    #               itself does. Scale-invariant. This is the one to compare
+    #               rows with.
+    #   wealth MDD = the drawdown of book + money already withdrawn. It shrinks
+    #               as the cap falls only because the denominator grows while the
+    #               risk unit does not - not because the strategy got safer.
+    #   cap 450wan  wealth CAGR 21.6%  book MDD -4.31%  wealth MDD -0.72%
+    #   cap 1kw     wealth CAGR 27.8%  book MDD -5.47%  wealth MDD -1.07%
+    #   cap 1yi     wealth CAGR 45.3%  book MDD -5.96%  wealth MDD -3.12%
+    #   no cap      wealth CAGR 57.7%  book MDD -5.35%  wealth MDD -5.35%
+    # Pinned at 450wan is the default because that is the size being traded, and
+    # it is the only row where the account simulated is the account live has. The
+    # strategy only deploys ~33 pct of it, so pinning costs nothing operationally
+    # - the extra CAGR in the higher rows comes from taking more signals and
+    # compounding, not from the strategy needing more capital.
     # None = never withdraw, which is what this script did before 2026-11-01.
-    capital_cap = 100_000_000
+    capital_cap = 4_500_000
 
     # --- Cost ---
     cost_per_trade = 0.00111  # 0.4 pct two-sided -> 0.2 pct/side x1.8 zhe + day-trade tax halved, per side

@@ -35,9 +35,23 @@ K_OPEN = 0.1497          # median opening value / T-1 dollar turnover
 FC_COST = 0.000498       # 13:25 vs 13:30, per force-closed trade
 SL_COST = 0.002053       # stop fill vs stop level, per stop-triggered trade
 
-# E[cost | predicted participation], measured. Monotone by construction.
-CURVE = [(0.0, -0.0002), (0.02, -0.0002), (0.05, 0.00038),
-         (0.10, 0.00038), (0.20, 0.00242), (1e9, 0.00242)]
+# E[cost | predicted participation]. Rebuilt 2026-11-01 from fill_cost.csv, the
+# per-order measurement (n=1,611 after dropping the 107 rows whose 09:00 bar has
+# high==low, where cost is zero by construction). The previous version of this
+# table was hand-built and did not come from that file: it charged +0.038 pct at
+# 5-10 pct participation where the measurement says +0.409 pct, and +0.242 pct
+# above 20 pct where the measurement says +0.53 to +0.62 pct. Since this curve is
+# the only thing standing between the backtest and a real fill, that understated
+# every number that depends on how big the orders are - which is exactly the
+# question "does this still work when the book is bigger".
+#
+# Bucket sizes: 1,094 / 213 / 115 / 107 / 57 / 25. The last two are thin, so the
+# tail is held flat at the 10-20 pct value instead of following the measured
+# 0.534 / 0.619 wiggle. x is the bucket upper edge, same convention as before.
+CURVE = [(0.0, -0.00125), (0.02, -0.00125), (0.05, 0.00052),
+         (0.10, 0.00409), (0.20, 0.00590), (1e9, 0.00590)]
+CURVE_OLD = [(0.0, -0.0002), (0.02, -0.0002), (0.05, 0.00038),
+             (0.10, 0.00038), (0.20, 0.00242), (1e9, 0.00242)]
 
 def slip_cost(part, scale):
     if not np.isfinite(part) or part <= 0:

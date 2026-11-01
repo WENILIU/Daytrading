@@ -25,8 +25,15 @@ model-target mismatch, not a measurement choice, and it does not change which
 number is right here.
 
 Usage: python v13_onebook.py
+
+  --fast   only the 450 萬-pinned book, all three liquidity rules, with the
+           yearly book-level drawdown for each. Pinning the book removes capital
+           size as a variable, so whatever the drawdown does over time is the
+           market, not the account. That is the question the full table cannot
+           answer, because every row there changes size and regime together.
 """
 import warnings; warnings.filterwarnings("ignore")
+import sys
 import numpy as np, pandas as pd
 from v13_engine import run_backtest, exit_of_legal, CAP0, COST
 import v13_sizing as S
@@ -58,12 +65,21 @@ GROUPS = {d: g[~g["blocked"]] for d, g in D.groupby("date")}
 CAPS = [("450 萬（每筆獲利都取出）", 4_500_000), ("1,000 萬", 10_000_000),
         ("2,000 萬", 20_000_000), ("5,000 萬", 50_000_000),
         ("1 億", 100_000_000), ("不設上限", None)]
+FAST = "--fast" in sys.argv
+if FAST:
+    CAPS = [CAPS[0]]
 
 
-def run(cap):
-    rule = dict(BASE); rule["dv_cap"] = K_OPEN * 0.25
+def run(cap, gate="dv"):
+    rule = dict(BASE)
+    if gate == "dv":
+        rule["dv_cap"] = K_OPEN * 0.25      # current live: cap the order
+    elif gate == "dv10":
+        rule["dv_cap"] = K_OPEN * 0.10      # same rule, half the participation
+    else:
+        rule["min_turnover_factor"] = 5.0   # the pre-2026-11-01 rule: gate the name
     book = float(CAP0); book_peak = float(CAP0); withdrawn = 0.0
-    rows = []; n_all = 0; parts = []; expo = []; brake_days = 0
+    rows = []; books = []; n_all = 0; parts = []; expo = []; brake_days = 0
     for d in days:
         cdd = (book - book_peak) / book_peak
         rs = 0.30 if cdd < -0.006 else (0.12 if cdd < -0.012 else 1.0)
@@ -98,22 +114,33 @@ def run(cap):
             withdrawn += book - cap; book = cap
         book_peak = max(book_peak, book)
         rows.append((d, book + withdrawn, yuan, n_day))
+        books.append(book)
     idx = pd.to_datetime([x[0] for x in rows])
     wealth = pd.Series([x[1] for x in rows], index=idx)
     pnl = pd.Series([x[2] for x in rows], index=idx)
     yrs = (idx[-1] - idx[0]).days / 365.25
     cagr = (wealth.iloc[-1] / CAP0) ** (1 / yrs) - 1
     dd = (wealth - wealth.cummax()) / wealth.cummax()
+    # The book is the risk unit. Its drawdown is the scale-invariant one, and
+    # therefore the only one that says whether live will feel like the backtest.
+    # Wealth MDD gets diluted by withdrawals: pin the book low and the
+    # denominator grows while the risk unit does not, so the number shrinks
+    # without the strategy getting any safer.
+    bs = pd.Series(books, index=idx)
+    ddb = (bs - bs.cummax()) / bs.cummax()
     ann = pnl.groupby(pnl.index.year).sum()
     P = np.array(parts) * 100 if parts else np.array([0.0])
     yearly = []
     for y in sorted(set(wealth.index.year)):
         seg = wealth[wealth.index.year == y]
         ydd = ((seg - seg.cummax()) / seg.cummax()).min() * 100
-        yearly.append((y, ydd, len(seg)))
+        bseg = bs[bs.index.year == y]
+        yddb = ((bseg - bseg.cummax()) / bseg.cummax()).min() * 100
+        yearly.append((y, ydd, yddb, len(seg)))
     return dict(yearly=yearly,
                 wealth=wealth.iloc[-1], withdrawn=withdrawn, cagr=cagr * 100,
                 mdd=dd.min() * 100, worst_year=ann.min() / 1e4, ann=ann,
+                mdd_book=ddb.min() * 100,
                 per_day=n_all / len(rows), brake=brake_days / len(rows) * 100,
                 p50=np.percentile(P, 50), p90=np.percentile(P, 90),
                 expo=np.percentile(np.array(expo), 50), final_book=book)
@@ -122,35 +149,78 @@ def run(cap):
 print()
 print("450 萬起、整張、零融資、單量<=開盤可成交額25%、成本全含、可執行性已過濾")
 print("回撤煞車一律接在「交易帳戶自己的淨值曲線」，也就是 live 讀 equity_state.json 看到的東西")
-print("%-24s %9s %8s %9s %11s %11s | %6s %6s %6s %6s" % (
-    "交易部位上限", "財富CAGR", "財富MDD", "最差年(萬)", "最終財富", "已出金", "筆/日", "煞車日%", "曝險%", "參與p90"))
+print("部位MDD = 交易帳戶自己的回撤，與資金大小無關，这才是實盤會感覺到的那個")
+print("%-24s %9s %8s %8s %9s %11s %11s | %6s %6s %6s %6s" % (
+    "交易部位上限", "財富CAGR", "部位MDD", "財富MDD", "最差年(萬)", "最終財富", "已出金",
+    "筆/日", "煞車日%", "曝險%", "參與p90"))
+GATES = [("單筆上限=開盤可成交額25%（現行 live）", "dv"),
+         ("單筆上限=開盤可成交額10%（保守參與率）", "dv10"),
+         ("T-1 成交額 < 5x淨值 才交易（舊的 factor=5）", "f5")]
 res = {}
-for label, cap in CAPS:
-    r = run(cap)
-    res[label] = r
-    print("%-24s %8.1f%% %7.2f%% %9.0f %11s %11s | %6.1f %6.1f %6.1f %6.1f" % (
-        label, r["cagr"], r["mdd"], r["worst_year"], "{:,.0f}".format(r["wealth"]),
-        "{:,.0f}".format(r["withdrawn"]), r["per_day"], r["brake"], r["expo"] * 100, r["p90"]))
-best = max(res.items(), key=lambda kv: kv[1]["cagr"] if kv[1]["mdd"] >= -5.0 else -1e9)
+allres = {}
+for gl, gg in GATES:
+    print()
+    print("=" * 118)
+    print("流動性規則：%s" % gl)
+    print("=" * 118)
+    print("%-24s %9s %8s %8s %9s %11s %11s | %6s %6s %6s %6s" % (
+        "交易部位上限", "財富CAGR", "部位MDD", "財富MDD", "最差年(萬)", "最終財富", "已出金",
+        "筆/日", "煞車日%", "曝險%", "參與p90"))
+    res = {}
+    for label, cap in CAPS:
+        r = run(cap, gg)
+        res[label] = r
+        allres[(gl, label)] = r
+        print("%-24s %8.1f%% %7.2f%% %7.2f%% %9.0f %11s %11s | %6.1f %6.1f %6.1f %6.1f" % (
+            label, r["cagr"], r["mdd_book"], r["mdd"], r["worst_year"],
+            "{:,.0f}".format(r["wealth"]),
+            "{:,.0f}".format(r["withdrawn"]), r["per_day"], r["brake"], r["expo"] * 100, r["p90"]))
 print()
-print("MDD 不劣於 -5%% 的最高 CAGR：%s -> CAGR %.1f%% / MDD %.2f%%" % (
-    best[0], best[1]["cagr"], best[1]["mdd"]))
-b = best[1]
+print("全部 %d 個組合，按「部位 MDD 不劣於 -5%%」過濾後比 CAGR：" % len(allres))
+ok = [(k[0], k[1], v["cagr"], v["mdd_book"], v["mdd"]) for k, v in allres.items()
+      if v["mdd_book"] >= -5.0]
+for gl, label, c, mb, mw in sorted(ok, key=lambda x: -x[2]):
+    print("  CAGR %6.1f%%  部位MDD %6.2f%%（財富MDD %6.2f%%）  <-  %s | 部位上限 %s" % (
+        c, mb, mw, gl, label))
+bk = max(((k, v) for k, v in allres.items() if v["mdd_book"] >= -5.0),
+         key=lambda kv: kv[1]["cagr"])
+print()
+print("部位 MDD 不劣於 -5%% 的最高 CAGR：%s | 部位上限 %s -> CAGR %.1f%% / 部位MDD %.2f%%" % (
+    bk[0][0], bk[0][1], bk[1]["cagr"], bk[1]["mdd_book"]))
+b = bk[1]
+res = {k[1]: v for k, v in allres.items() if k[0] == bk[0][0]}
 print("  逐年總利得（萬元）：")
 print("   ", {int(k): round(v / 1e4, 0) for k, v in b["ann"].items()})
 print("  最終交易部位 %s、已出金 %s、最終財富 %s" % (
     "{:,.0f}".format(b["final_book"]), "{:,.0f}".format(b["withdrawn"]), "{:,.0f}".format(b["wealth"])))
 
 print()
-print("逐年實際經歷（財富曲線在該年內從高點跌下去最多多少）")
+if FAST:
+    print()
+    print("=" * 100)
+    print("部位釘在 450 萬：資金規模已固定，逐年回撤只剩市場環境這個變因")
+    print("=" * 100)
+    for gl, gg in GATES:
+        r = run(CAPS[0][1], gg)
+        print()
+        print("  %s" % gl)
+        print("    %-6s %9s %9s %9s %9s" % ("年", "部位MDD%", "財富MDD%", "年利得(萬)", "交易日"))
+        for y, ydd, yddb, nseg in r["yearly"]:
+            g = r["ann"].get(y, 0.0)
+            print("    %-6d %9.2f %9.2f %9.0f %9d" % (y, yddb, ydd, g / 1e4, nseg))
+        print("    -> 全期 部位MDD %.2f%%、財富CAGR %.1f%%、筆/日 %.1f" % (
+            r["mdd_book"], r["cagr"], r["per_day"]))
+    raise SystemExit(0)
+
+print("逐年實際經歷（左=交易帳戶回撤，右=含出金的財富回撤）")
 print("全期 MDD 是被後段部位變大那年拉高的，下面才是 450 萬這個規模會感覺到的東西")
-for label in ("450 萬（每筆獲利都取出）", "1 億", "不設上限"):
+for label in ("450 萬（每筆獲利都取出）", bk[0][1], "不設上限"):
     r = res[label]
     print()
     print("  %s" % label)
-    print("    %-6s %9s %9s %9s" % ("年", "MDD%", "年利得(萬)", "交易日"))
-    for y, ydd, nseg in r["yearly"]:
+    print("    %-6s %9s %9s %9s %9s" % ("年", "部位MDD%", "財富MDD%", "年利得(萬)", "交易日"))
+    for y, ydd, yddb, nseg in r["yearly"]:
         g = r["ann"].get(y, 0.0)
-        print("    %-6d %9.2f %9.0f %9d" % (y, ydd, g / 1e4, nseg))
+        print("    %-6d %9.2f %9.2f %9.0f %9d" % (y, yddb, ydd, g / 1e4, nseg))
     first = r["yearly"][0]
-    print("    -> 第一年 MDD %.2f%%（這是 450 萬起步時實際會遇到的量級）" % first[1])
+    print("    -> 第一年 部位MDD %.2f%%（這是 450 萬起步時實際會遇到的量級）" % first[2])
