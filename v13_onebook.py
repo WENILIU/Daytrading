@@ -68,9 +68,10 @@ CAPS = [("450 萬（每筆獲利都取出）", 4_500_000), ("1,000 萬", 10_000_
 FAST = "--fast" in sys.argv
 if FAST:
     CAPS = [CAPS[0]]
+YEARLY = "--yearly" in sys.argv
 
 
-def run(cap, gate="dv"):
+def run(cap, gate="dv", nozt=False):
     rule = dict(BASE)
     if gate == "dv":
         rule["dv_cap"] = K_OPEN * 0.25      # current live: cap the order
@@ -80,6 +81,7 @@ def run(cap, gate="dv"):
         rule["min_turnover_factor"] = 5.0   # the pre-2026-11-01 rule: gate the name
     book = float(CAP0); book_peak = float(CAP0); withdrawn = 0.0
     rows = []; books = []; n_all = 0; parts = []; expo = []; brake_days = 0
+    trs = []
     for d in days:
         cdd = (book - book_peak) / book_peak
         rs = 0.30 if cdd < -0.006 else (0.12 if cdd < -0.012 else 1.0)
@@ -99,6 +101,23 @@ def run(cap, gate="dv"):
             ex, slp, tpp, reason, gross = exit_of_legal(
                 r["direction"], pr, float(r["day_high"]), float(r["day_low"]), float(r["day_close"]),
                 float(r["lu"]), float(r["ld"]), float(r["tick"]), float(r["tp"]))
+            # Counterfactual for the limit-capped stops: what holding to 13:25
+            # would have paid instead. Without this the stop count is just a
+            # number - it does not say whether the stop is earning its keep.
+            dcl = float(r["day_close"])
+            cf = (pr - dcl) / pr if r["direction"] == "SHORT" else (dcl - pr) / pr
+            cf -= FC_COST
+            # Still pinned at the limit when the session ends. This is the only
+            # population where "do not stop at the limit" changes the operational
+            # story - those are the orders the 13:25 settlement has to handle
+            # instead of a normal fill. Everything else unlocked on its own.
+            locked = (abs(dcl - float(r["lu"])) < 1e-6 if r["direction"] == "SHORT"
+                      else abs(dcl - float(r["ld"])) < 1e-6)
+            # nozt: do not let the price limit pull the stop in. For a SHORT the
+            # limit-up price IS the worst case anyway, so stopping there buys
+            # almost no protection while giving up the unlock. Measured below.
+            if nozt and reason.startswith("停損(觸"):
+                gross = cf
             if reason == "13:25 強制平倉":
                 gross -= FC_COST
             if reason.startswith("停損"):
@@ -108,6 +127,7 @@ def run(cap, gate="dv"):
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
+            trs.append((d, gross, reason, cf, notional, locked))
         expo.append((book - rem) / book)
         book += yuan
         if cap is not None and book > cap:
@@ -143,7 +163,106 @@ def run(cap, gate="dv"):
                 mdd_book=ddb.min() * 100,
                 per_day=n_all / len(rows), brake=brake_days / len(rows) * 100,
                 p50=np.percentile(P, 50), p90=np.percentile(P, 90),
-                expo=np.percentile(np.array(expo), 50), final_book=book)
+                expo=np.percentile(np.array(expo), 50), final_book=book,
+                trades=trs, rows=rows)
+
+
+if YEARLY:
+    # The shipped configuration: book pinned at 4.5M, order size capped at 10 pct
+    # of the opening auction. This is the one row where the account simulated IS
+    # the account live has, so a year below is what a real year would look like -
+    # including that the drawdown has been getting worse while the profit per
+    # year has not.
+    r = run(4_500_000, "dv10")
+    T = pd.DataFrame(r["trades"], columns=["date", "net", "reason", "cf", "notional", "locked"])
+    T["y"] = pd.to_datetime(T["date"]).dt.year
+
+    def why(s):
+        if s.startswith("停損(觸"):
+            return "SLz"
+        if s.startswith("停損"):
+            return "SL"
+        if s.startswith("停利"):
+            return "TP"
+        return "FC"
+
+    T["k"] = T["reason"].map(why)
+    G = T.groupby("y")
+    print()
+    print("=" * 112)
+    print("逐年完整績效：部位釘在 450 萬、單筆上限=開盤可成交額 10%、整張、零融資、成本全含、可執行性已過濾")
+    print("=" * 112)
+    # The stop split is the point of this mode. A stop count on its own does not
+    # say whether the stop is earning its keep, so every stop row also carries the
+    # counterfactual: what holding to 13:25 would have paid instead.
+    print("%-6s %5s %6s %7s %9s %10s %9s | %7s %7s %10s %10s %11s %11s" % (
+        "年", "交易日", "筆數", "勝率%", "平均每筆%", "年利得(萬)", "部位MDD%",
+        "正常SL%", "觸漲停%", "正常SL均虧", "觸漲停均虧", "觸漲停持有%", "停損拖累(萬)"))
+    yb = {y: (ydd, yddb, nseg) for y, ydd, yddb, nseg in r["yearly"]}
+    tot = 0.0
+    for y, g in G:
+        n = len(g); win = (g["net"] > 0).mean() * 100
+        yuan = r["ann"].get(y, 0.0); tot += yuan
+        c = g["k"].value_counts()
+        sl = g[g["k"] == "SL"]; slz = g[g["k"] == "SLz"]
+        drag = (sl["net"] * sl["notional"]).sum() / 1e4
+        print("%-6d %5d %6d %7.1f %9.3f %10.0f %9.2f | %7.1f %7.1f %10.2f %10.2f %11.2f %11.0f" % (
+            y, yb[y][2], n, win, g["net"].mean() * 100, yuan / 1e4, yb[y][1],
+            len(sl) / n * 100, len(slz) / n * 100,
+            sl["net"].mean() * 100 if len(sl) else 0.0,
+            slz["net"].mean() * 100 if len(slz) else 0.0,
+            slz["cf"].mean() * 100 if len(slz) else 0.0, drag))
+    print("-" * 112)
+    allsl = T[T["k"] == "SL"]; allz = T[T["k"] == "SLz"]
+    print("%-6s %5s %6d %7.1f %9.3f %10.0f %9s | %7.1f %7.1f %10.2f %10.2f %11.2f %11.0f" % (
+        "合計", "", len(T), (T["net"] > 0).mean() * 100, T["net"].mean() * 100, tot / 1e4, "",
+        len(allsl) / len(T) * 100, len(allz) / len(T) * 100, allsl["net"].mean() * 100,
+        allz["net"].mean() * 100, allz["cf"].mean() * 100,
+        (allsl["net"] * allsl["notional"]).sum() / 1e4))
+    print()
+    print("觸漲停停損：停損價被漲跌停壓到比 4%% 更近的位置，所以虧損比 4%% 小。")
+    print("  「觸漲停持有%」= 這些單如果不停損、改由 13:25 強制平倉的平均損益。正數代表停損是對的。")
+    z = T[T["k"] == "SLz"]
+    if len(z):
+        print("  合計 %d 筆。停損比持有到 13:25 好：%d 筆（%.1f%%）。" % (
+            len(z), int((z["net"] > z["cf"]).sum()), (z["net"] > z["cf"]).mean() * 100))
+        zl = z[z["locked"]]
+        print("  其中到 13:25 仍然鎖在漲跌停：%d 筆（%.1f%%），平均虧 %.2f%%。" % (
+            len(zl), len(zl) / len(z) * 100, zl["cf"].mean() * 100 if len(zl) else 0.0))
+        print("  這 %d 筆才是需要 13:25 結算機制處理的；其餘 %d 筆自己解開了。" % (
+            len(zl), len(z) - len(zl)))
+    print()
+    print("最終財富 %s（其中已出金 %s）、財富 CAGR %.1f%%、部位 MDD %.2f%%、財富 MDD %.2f%%" % (
+        "{:,.0f}".format(r["wealth"]), "{:,.0f}".format(r["withdrawn"]), r["cagr"],
+        r["mdd_book"], r["mdd"]))
+    print("部位釘在 450 萬，所以年利得全部等同出金；部位報酬% = 年利得 / 450 萬。")
+
+    print()
+    print("=" * 100)
+    print("對照組：把「漲停壓縮停損」拿掉 → 停損一律 4%，觸漲停不停損，改由 13:25 平倉")
+    print("=" * 100)
+    r2 = run(4_500_000, "dv10", nozt=True)
+    T2 = pd.DataFrame(r2["trades"], columns=["date", "net", "reason", "cf", "notional", "locked"])
+    T2["y"] = pd.to_datetime(T2["date"]).dt.year
+    yb2 = {y: (ydd, yddb, nseg) for y, ydd, yddb, nseg in r2["yearly"]}
+    print("%-6s %12s %12s %9s | %10s %10s %9s" % (
+        "年", "現行利得(萬)", "改後利得(萬)", "差(萬)", "現行MDD%", "改後MDD%", "改後勝率%"))
+    for y in sorted(r2["ann"].index):
+        a = r["ann"].get(y, 0.0); b = r2["ann"].get(y, 0.0)
+        print("%-6d %12.0f %12.0f %9.0f | %10.2f %10.2f %9.1f" % (
+            y, a / 1e4, b / 1e4, (b - a) / 1e4, yb[y][1], yb2[y][1],
+            (T2[T2["y"] == y]["net"] > 0).mean() * 100))
+    print("-" * 100)
+    s2 = float(r2["ann"].sum())
+    print("%-6s %12.0f %12.0f %9.0f | %10.2f %10.2f %9.1f" % (
+        "全期", tot / 1e4, s2 / 1e4, (s2 - tot) / 1e4, r["mdd_book"], r2["mdd_book"],
+        (T2["net"] > 0).mean() * 100))
+    print()
+    print("現行：財富 CAGR %.1f%%、部位 MDD %.2f%%、最終財富 %s" % (
+        r["cagr"], r["mdd_book"], "{:,.0f}".format(r["wealth"])))
+    print("改後：財富 CAGR %.1f%%、部位 MDD %.2f%%、最終財富 %s" % (
+        r2["cagr"], r2["mdd_book"], "{:,.0f}".format(r2["wealth"])))
+    raise SystemExit(0)
 
 
 print()
