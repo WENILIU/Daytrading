@@ -573,13 +573,16 @@ class Config:
     # the book near flat whatever the ceiling allows. So the ceiling buys return and
     # costs only a credit line.
     #   1.00 -> +68.2 pct/yr 13yr (+80.4 pct 2022-26), no margin
-    #   1.25 -> +77.7 (+93.8), margin 5,620,000
     #   1.50 -> +89.5 (+112.2), margin 6,750,000
-    #   1.75 -> +98.2 (+122.0), margin 7,880,000  <- shipped
-    #   1.90 -> +103.2 (+129.0), margin 8,550,000  <- crosses 100 pct
-    # Average deployment is 24 pct of the book; the ceiling binds only on the busiest
-    # days, so the margin line is a credit line, not a standing loan.
-    max_total_exposure = 1.75
+    #   1.75 -> +98.2 (+122.0), margin 7,880,000
+    #   1.90 -> +103.2 (+129.0), margin 8,550,000  <- shipped, clears 100 pct
+    # It does not make the orders bigger, only more numerous: participation p90 is
+    # 6.6 pct at 1.00x and 7.2 pct at 2.00x, because the per-name liquidity cap sizes
+    # the order, not the portfolio ceiling (v13_partcheck.py). Average deployment is
+    # 23 pct of the book; the ceiling binds only on the busiest days, so the margin
+    # line is a credit line, not a standing loan. Drop to 1.75 / 1.50 / 1.00 if the
+    # broker will not extend the line - the drawdown does not change.
+    max_total_exposure = 1.90
     zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
     zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
     dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
