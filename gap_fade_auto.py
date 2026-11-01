@@ -4896,6 +4896,16 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "scan_delay_sec": self.exec_stats.get("scan_delay_sec", 0.0),
             "scan_delay_applied": self.exec_stats.get("scan_delay_applied", False),
             "entry_mode": "open" if self.config.entry_at_open else "quote_at_delay",
+            # The two entry numbers have different anchors, and reading them as one
+            # number is the mistake this note exists to prevent. Put it in the file
+            # rather than only in the prose, so whoever reads the report tomorrow -
+            # including the 13:32 summary - cannot take the flattering one alone.
+            "entry_mode_note": (
+                "entry_slippage below is intended price vs the next market price. "
+                "Under quote_at_delay the intended price IS a market price, so near "
+                "zero there is expected and says nothing about the entry. The entry "
+                "cost against the open - the anchor the backtest uses - is "
+                "entry_cost_vs_open."),
             "entry_delay_sec": self.exec_stats.get("entry_delay_sec", 0.0),
             "entry_delay_applied": self.exec_stats.get("entry_delay_applied", False),
             "entry_book_read": self.exec_stats.get("entry_book_read", {}),
