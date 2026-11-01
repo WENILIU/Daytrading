@@ -1,4 +1,4 @@
-"""Gap Fade v13 - per-trade audit / live plan generator.
+﻿"""Gap Fade v13 - per-trade audit / live plan generator.
 
 Two sizing views, same signals, same day:
   A = published backtest sizing (compounding equity, the allocation loop of
@@ -86,7 +86,12 @@ def exit_of_legal(direction, entry, hi, lo, cl, lu, ld, tk, tp):
         if lo <= tpp:
             return tpp, slp, tpp, "停利 TP", (entry - tpp) / entry
         if hi >= slp:
-            r = "停損(觸漲停上限)" if slp < entry * (1 + SLO) - 1e-9 else "停損 SL"
+            # The limit bound binds only when it is the tighter of the two stops.
+            # slp cannot be the test here: snap_price rounds to the nearest legal
+            # price, so an ordinary 4% stop lands below entry*(1+SLO) about half the
+            # time and was being counted as a limit touch (found 2026-11-02).
+            r = ("停損(觸漲停上限)" if round(lu - tk, 2) < snap_price(entry * (1 + SLO)) - 1e-9
+                 else "停損 SL")
             return slp, slp, tpp, r, -(slp - entry) / entry
         return cl, slp, tpp, "13:25 強制平倉", (entry - cl) / entry
     tpp = snap_price(entry * (1 + tp))
@@ -94,7 +99,8 @@ def exit_of_legal(direction, entry, hi, lo, cl, lu, ld, tk, tp):
     if hi >= tpp:
         return tpp, slp, tpp, "停利 TP", (tpp - entry) / entry
     if lo <= slp:
-        r = "停損(觸跌停下限)" if slp > entry * (1 - SLO) + 1e-9 else "停損 SL"
+        r = ("停損(觸跌停下限)" if round(ld + tk, 2) > snap_price(entry * (1 - SLO)) + 1e-9
+             else "停損 SL")
         return slp, slp, tpp, r, -(entry - slp) / entry
     return cl, slp, tpp, "13:25 強制平倉", (cl - entry) / entry
 
