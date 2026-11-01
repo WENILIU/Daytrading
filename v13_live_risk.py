@@ -182,7 +182,7 @@ def risk_orders(n_probe=6):
                            open_price=last, prev_close=prev, raw_gap=0.0, adj_gap=0.0)
             sig.shares = 1000                       # exactly 1 張
             sig.entry_price = ld
-            sig.sl_price, sig._sl_pct = G.calc_effective_sl(
+            sig.sl_price, sig._sl_pct, _lb = G.calc_effective_sl(
                 ld, prev, G.Direction.LONG, cfg.stop_loss_pct)
             sig.tp_price = round(ld * 1.05, 2)
             sig._tp_pct = 0.05

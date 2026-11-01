@@ -67,6 +67,10 @@ SUITES = [
      "(a name visible at +8s is not tradeable at +2s), keeps SHORT and LONG apart "
      "because the same path is a cost for one and a gain for the other, and reads "
      "both feeds' session-date formats"),
+    ("_test_limit_lock.py",
+     "the limit-lock switch only ever unarms a stop whose price limit is the binding "
+     "constraint, an ordinary 4% stop stays armed under both rules, an unarmed stop "
+     "is never read as an instant exit, and the shipped default is still \"stop\""),
     ("_test_limit_label.py",
      "a stop is named after the constraint that binds it: an ordinary 4% stop that "
      "snaps to a lower legal price is 停損 SL, not a price-limit touch (the mislabel "

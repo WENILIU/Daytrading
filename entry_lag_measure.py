@@ -104,7 +104,7 @@ for si, (stock, sigs) in enumerate(sorted(by_stock.items())):
         if len(B) < 3:
             continue
         d = r.direction
-        sl, _ = calc_effective_sl(
+        sl, _, _ = calc_effective_sl(
             r.entry, r.prev_close,
             Direction.SHORT if d == "SHORT" else Direction.LONG, 0.04)
         # SHORT take-profit is BELOW the entry, LONG above it.

@@ -547,6 +547,16 @@ class Config:
 
     # ===== v13 EXIT =====
     stop_loss_pct = 0.04            # SL 4 pct, capped by price limit (dynamic)
+    # What to do when the price limit, not the 4 pct, is what sets the stop.
+    #   "stop" (default, shipped): arm a stop at 漲停/跌停 - 1 tick.
+    #   "hold"  : do not arm a stop at all; the 13:25 force close is the exit.
+    # "hold" is not extra risk. A buy order one tick under a locked limit-up sits
+    # behind the queue and does not fill, so for the 52% of these that are still
+    # pinned at 13:25 (1-minute bars, 2026-11-02) the "stop" price was never an
+    # obtainable price; "hold" settles them at the limit itself, one tick worse.
+    # Measured on the shipped book: 2022-2026 +74.5% -> +83.3%, MDD -4.60% ->
+    # -4.39% (v17_nozt_yearly.py). Off until 文義 chooses it.
+    limit_lock_rule = "stop"
     take_profit_pct = 0.12          # TP low
     take_profit_high_pct = 0.20     # TP high when q1 >= q1_tp_threshold
     q1_tp_threshold = 0.85
@@ -805,7 +815,14 @@ def calc_price_limits(prev_close: float) -> tuple:
 
 def calc_effective_sl(entry: float, prev_close: float, direction,
                       base_sl_pct: float) -> tuple:
-    """Dynamic SL: min(normal SL, price_limit - 1 tick). Always reachable."""
+    """Dynamic SL: min(normal SL, price_limit - 1 tick). Always reachable.
+
+    Returns (price, pct, limit_bound). The third value says which of the two stops
+    is the tighter one, and it must be compared the same way the backtest does it
+    after the 2026-11-02 label fix: the LIMIT price against the SNAPPED normal
+    stop. Comparing the chosen price against the un-snapped entry*(1+SL) is what
+    made 32x more ordinary stops look like limit touches in v13_engine.
+    """
     limit_up, limit_down = calc_price_limits(prev_close)
     # The decrement must come from the band of the LIMIT price, because `lu - tick`
     # has to be a price the exchange accepts. 5215 on 2013-01-03: entry 46.70
@@ -828,7 +845,10 @@ def calc_effective_sl(entry: float, prev_close: float, direction,
         sl_price = max(normal_sl, limit_sl)
         sl_pct = (entry - sl_price) / entry
 
-    return round(sl_price, 2), max(0.01, sl_pct)
+    # Which of the two stops is the tighter one. The comparison flips with the
+    # direction because the SHORT stop is a min and the LONG stop is a max.
+    limit_bound = (limit_sl < normal_sl) if direction == Direction.SHORT else (limit_sl > normal_sl)
+    return round(sl_price, 2), max(0.01, sl_pct), limit_bound
 
 
 def _to_float(v) -> float:
@@ -2693,11 +2713,15 @@ class GapFadeAutoTrader:
             sig.shares = shares
 
             # Dynamic SL: min(4 pct, price_limit - 1 tick). Always reachable, never locked.
-            sl_price, sl_pct = calc_effective_sl(
+            sl_price, sl_pct, limit_bound = calc_effective_sl(
                 entry_price, sig.prev_close, sig.direction,
                 self.config.stop_loss_pct)
-            sig.sl_price = sl_price
             sig._sl_pct = sl_pct  # store for Smart Trade
+            # Only the limit-bound stops are affected. An ordinary 4% stop is a
+            # price the market trades through, so it stays armed under both rules.
+            sig._no_stop_leg = bool(
+                limit_bound and getattr(self.config, "limit_lock_rule", "stop") == "hold")
+            sig.sl_price = 0.0 if sig._no_stop_leg else sl_price
 
             tp_pct = self._get_tp_pct(sig)
             if sig.direction == Direction.SHORT:
@@ -2712,7 +2736,7 @@ class GapFadeAutoTrader:
                 f"price={entry_price} [{getattr(sig, '_entry_src', 'open')}, "
                 f"vs open {getattr(sig, '_entry_vs_open', 0.0):+.2f}%] "
                 f"shares={shares} tier={sig.tier} "
-                f"SL={sig.sl_price}({getattr(sig, '_sl_pct', 0)*100:.1f}%) "
+                f"SL={'none(limit-bound)' if getattr(sig, '_no_stop_leg', False) else str(sig.sl_price) + '(' + format(getattr(sig, '_sl_pct', 0)*100, '.1f') + '%)'} "
                 f"TP={sig.tp_price}({getattr(sig, '_tp_pct', 0)*100:.0f}%) | limit={limit_up}/{limit_down}")
 
             # Place order
@@ -3112,14 +3136,25 @@ class GapFadeAutoTrader:
         oOrder.bstrMITTriggerPrice = "0"
         oOrder.bstrMITDealPrice = "0"
 
-        # Stop loss on an absolute price (already capped by the price limit)
-        oOrder.nStopLossFlag = 1
-        oOrder.nRDOSLPercent = 0
-        oOrder.bstrSLTrigger = str(sig.sl_price)
-        oOrder.bstrSLPercent = "0"
-        oOrder.bstrSLOrderPrice = "0"
-        oOrder.nRDSLMarketPriceType = 1                 # market order once triggered
-        oOrder.nStopLossOrderCond = 0
+        # Stop loss on an absolute price (already capped by the price limit).
+        # A limit-bound position under the "hold" rule carries no stop leg at all;
+        # the 13:20 clear / 13:25 force close is its exit.
+        if getattr(sig, "_no_stop_leg", False):
+            oOrder.nStopLossFlag = 0
+            oOrder.nRDOSLPercent = 0
+            oOrder.bstrSLTrigger = "0"
+            oOrder.bstrSLPercent = "0"
+            oOrder.bstrSLOrderPrice = "0"
+            oOrder.nRDSLMarketPriceType = 1
+            oOrder.nStopLossOrderCond = 0
+        else:
+            oOrder.nStopLossFlag = 1
+            oOrder.nRDOSLPercent = 0
+            oOrder.bstrSLTrigger = str(sig.sl_price)
+            oOrder.bstrSLPercent = "0"
+            oOrder.bstrSLOrderPrice = "0"
+            oOrder.nRDSLMarketPriceType = 1                 # market order once triggered
+            oOrder.nStopLossOrderCond = 0
 
         # Take profit on an absolute price
         oOrder.nTakeProfitFlag = 1
@@ -3228,14 +3263,17 @@ class GapFadeAutoTrader:
                         sig = self.active_positions.get(sym)
                         if sig is None:
                             continue
-                        # Detect likely exit for reporting
+                        # Detect likely exit for reporting. sl_price 0 means the
+                        # stop leg was never armed (limit-bound under "hold");
+                        # comparing against 0 would call every tick a stop.
+                        armed = sig.sl_price > 0
                         if sig.direction == Direction.SHORT:
-                            if price >= sig.sl_price:
+                            if armed and price >= sig.sl_price:
                                 self._mark_exit(sig, price, "STOP_LOSS")
                             elif price <= sig.tp_price:
                                 self._mark_exit(sig, price, "TAKE_PROFIT")
                         else:
-                            if price <= sig.sl_price:
+                            if armed and price <= sig.sl_price:
                                 self._mark_exit(sig, price, "STOP_LOSS")
                             elif price >= sig.tp_price:
                                 self._mark_exit(sig, price, "TAKE_PROFIT")
@@ -3987,14 +4025,15 @@ class GapFadeNowTrader(GapFadeSimulator):
 
                 should_exit = False
                 reason = ""
+                armed = sig.sl_price > 0
 
                 if sig.direction == Direction.SHORT:
-                    if price >= sig.sl_price:
+                    if armed and price >= sig.sl_price:
                         should_exit, reason = True, "STOP_LOSS"
                     elif price <= sig.tp_price:
                         should_exit, reason = True, "TAKE_PROFIT"
                 else:
-                    if price <= sig.sl_price:
+                    if armed and price <= sig.sl_price:
                         should_exit, reason = True, "STOP_LOSS"
                     elif price >= sig.tp_price:
                         should_exit, reason = True, "TAKE_PROFIT"
@@ -4422,10 +4461,15 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 first_px = not getattr(sig, "_px_observed", False)
                 sig._px_observed = True
                 invented = first_px and late_session
+                # sl_price 0 means no stop leg was ever armed (a limit-bound
+                # position under limit_lock_rule="hold"). Comparing against 0
+                # would call every tick above zero a stop, which is how an
+                # unarmed stop would silently become an instant exit.
+                armed = sig.sl_price > 0
                 if sig.direction == Direction.SHORT:
-                    hit_sl, hit_tp = price >= sig.sl_price, price <= sig.tp_price
+                    hit_sl, hit_tp = armed and price >= sig.sl_price, price <= sig.tp_price
                 else:
-                    hit_sl, hit_tp = price <= sig.sl_price, price >= sig.tp_price
+                    hit_sl, hit_tp = armed and price <= sig.sl_price, price >= sig.tp_price
                 # A poll that crosses both levels takes the stop: the intra-poll
                 # order is unknown, so assume the worse outcome.
                 if hit_sl:
