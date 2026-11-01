@@ -1,4 +1,4 @@
-"""
+﻿"""
 Gap Fade v3 AUTO - Plan B (CAGR~108%, MDD~-1.7%) | Capital Securities / SKCOM
 =========================================================================
 Broker: Capital Securities (群益金鼎) via SKCOM COM API
@@ -508,12 +508,28 @@ class Config:
     # by waiting (-0.094 pct of notional) while a 7-10 pct gap SHORT pays +0.353,
     # and that group is also the one that gets stopped out. So the large-gap tail is
     # where the entry cost and the stop losses both live.
-    # Chosen on 2014-2021, validated on 2022-2026 (v13_target5.py / v13_gapbound.py):
-    # 2022-2026 goes from +95.0 pct to +104.2 pct a year and the position drawdown
-    # improves from -5.15 pct to -3.88 pct. The value is not load-bearing: anything
-    # from 0.03 to 0.08 behaves the same, and it only starts costing return below
-    # 0.03, where the strategy begins cutting its own edge.
-    gap_max = 0.06                  # skip |adj_gap| > 6 pct
+    # One ceiling for both directions was a mistake. The two sides do not have the
+    # same minimum gap (SHORT signals start at 1.5 pct, LONG at 5 pct) and do not
+    # fail the same way, so a single number silently changes the strategy: a ceiling
+    # of 0.04 deletes every LONG. Cap them separately, each where its own risk lives.
+    #
+    # SHORT 0.04 - the binding constraint is the limit-stop, not the entry cost.
+    #   The stop is capped by the price limit, so a large gap means the stop is
+    #   closer to the limit than to the entry and gets triggered by the limit
+    #   itself. The measured stop-out share rises from 4.4 pct (2014) to 40.5 pct
+    #   (2026); keeping |gap| under 4 pct puts the limit far enough away that it
+    #   stops being the exit. Position drawdown over the SHORT ceiling:
+    #     0.03 -3.71  0.035 -3.75  0.04 -3.87  0.045 -5.24  0.05 -4.60  0.06 -5.31
+    #   0.04 is the last value before the risk regime changes (v13_v15.py).
+    # LONG 0.08 - the binding constraint is the measured entry cost, which for LONG
+    #   is +0.38 pct at 5-7 pct gap, +0.23 at 7-10, +0.72 at >=10 (v13_target.ENTRY_COST).
+    #   0.07/0.08/0.10 all give the same drawdown; 0.06 starts cutting working LONGs.
+    gap_max_short = 0.04            # skip SHORT with |adj_gap| > 4 pct
+    gap_max_long = 0.08             # skip LONG with |adj_gap| > 8 pct
+
+    def gap_cap(self, direction):
+        """The gap ceiling for one direction. None means uncapped."""
+        return self.gap_max_long if direction == Direction.LONG else self.gap_max_short
     min_price = 30                  # prev_close >= 30 TWD
     # T-1 turnover floor is a fixed 10M, the same base the backtest applies
     # (v13_build.py ptv >= 1e7). Impact is NOT handled by a floor that grows
@@ -549,13 +565,21 @@ class Config:
     # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
     position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
     pos_cap_pct = 0.25              # hard cap per name
-    # 1.25, not 1.00. With the entry cost measured instead of modelled, zero margin
-    # tops out at +87.1 pct a year on 2022-2026 (v13_confirm.py); the 100 pct target
-    # needs a ceiling of 1.25x equity, i.e. a margin line of about 5,630,000 TWD.
-    # Observed maximum deployment on any day in 13 years is exactly the ceiling, so
-    # the borrowing is real but never exceeds it. Average deployment is 31 pct.
-    # Set back to 1.00 to trade zero margin at +87.1 pct / position MDD -4.48 pct.
-    max_total_exposure = 1.25
+    # 1.75. This is the only knob between the target and not reaching it, and it is
+    # the one knob that does NOT change risk: with the per-direction gap caps in place
+    # the position drawdown is -3.87 pct at every ceiling from 1.00 to 2.00
+    # (v13_v15.py). The drawdown is set by which signals are taken, not by how big
+    # they are, because the equity-drawdown brake fires on 48 pct of days and holds
+    # the book near flat whatever the ceiling allows. So the ceiling buys return and
+    # costs only a credit line.
+    #   1.00 -> +68.2 pct/yr 13yr (+80.4 pct 2022-26), no margin
+    #   1.25 -> +77.7 (+93.8), margin 5,620,000
+    #   1.50 -> +89.5 (+112.2), margin 6,750,000
+    #   1.75 -> +98.2 (+122.0), margin 7,880,000  <- shipped
+    #   1.90 -> +103.2 (+129.0), margin 8,550,000  <- crosses 100 pct
+    # Average deployment is 24 pct of the book; the ceiling binds only on the busiest
+    # days, so the margin line is a credit line, not a standing loan.
+    max_total_exposure = 1.75
     zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
     zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
     dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
@@ -1835,10 +1859,11 @@ class GapFadeAutoTrader:
             if direction is None:
                 continue
 
-            # The gap ceiling. Placed here, before the borrow and day-trade checks,
-            # so the rejection is attributed to the gap and not to whichever check
-            # happens to run second.
-            if abs(adj_gap) > self.config.gap_max:
+            # The gap ceiling, per direction. Placed here, before the borrow and
+            # day-trade checks, so the rejection is attributed to the gap and not to
+            # whichever check happens to run second.
+            cap = self.config.gap_cap(direction)
+            if cap is not None and abs(adj_gap) > cap:
                 self._gap_reject += 1
                 continue
 
@@ -1885,7 +1910,9 @@ class GapFadeAutoTrader:
             self.log.warning("  SHORT leg NOT filtered for lending quota (see above)")
         else:
             self.log.info(f"  Rejected SHORT for no lending quota (T-1): {self._nb_reject}")
-            self.log.info(f"  Rejected for |adj_gap| > {self.config.gap_max*100:.0f} pct: {self._gap_reject}")
+            self.log.info(
+                f"  Rejected for |adj_gap| > SHORT {self.config.gap_max_short*100:.0f} pct / "
+                f"LONG {self.config.gap_max_long*100:.0f} pct: {self._gap_reject}")
         self.exec_stats["day_trade_dropped"] = self._dt_reject_detail
         if self._dt_reject_detail:
             _sh = sum(1 for d in self._dt_reject_detail if d[1] == "SHORT")

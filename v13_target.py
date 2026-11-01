@@ -1,4 +1,4 @@
-"""Search for a configuration that still clears CAGR 100 pct / MDD -5 pct once the
+﻿"""Search for a configuration that still clears CAGR 100 pct / MDD -5 pct once the
 entry has to be paid for.
 
 Frame, and why this frame: the book is pinned at 4_500_000 and every profit is
@@ -91,7 +91,7 @@ print("signals %d, blocked by executability %d" % (len(D), int(D["blocked"].sum(
 
 def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False,
-        cost_mode="measured", spread=SPREAD):
+        cost_mode="measured", spread=SPREAD, gap_max_long=None):
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
     # brake is (t1, s1, t2, s2): below t1 scale to s1, below t2 scale to s2.
     # None disables it. Note what pinning the book does to this rule: the book is
@@ -108,6 +108,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     # stays under 100 pct the exposure ceiling only stops the capital check
     # from starving later signals, and no borrowing happens.
     expo_book = []
+    dir_n = {"SHORT": 0, "LONG": 0}
+    dir_y = {"SHORT": 0.0, "LONG": 0.0}
     for d in days:
         cdd = (book - peak) / peak
         rs = 1.0
@@ -120,7 +122,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             if n_day >= order_cap:
                 break
             ag = abs(float(r["adj_gap"]))
-            if gap_max is not None and ag > gap_max:
+            # The two directions have different minimum gaps (SHORT 1.5 pct, LONG 5 pct)
+            # and different measured entry costs, so one cap conflates them: gap_max 0.04
+            # silently deletes every LONG. Cap them separately.
+            cap = gap_max_long if r["direction"] == "LONG" else gap_max
+            if cap is not None and ag > cap:
                 continue
             pr = float(r["entry"]); code = str(r["stock"])
             w = float(r["_weight"]) / (float(r["_rs"]) or 1.0) * rs
@@ -151,6 +157,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
+            dir_n[r["direction"]] += 1; dir_y[r["direction"]] += notional * gross
         book += yuan
         if book > CAP0:
             withdrawn += book - CAP0; book = CAP0
@@ -163,7 +170,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     return dict(yearly=yearly, mdd=worst_dd * 100, n=n_all,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
-                withdrawn=withdrawn)
+                withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y)
 
 def main():
     def show(label, cfg):
