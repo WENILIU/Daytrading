@@ -557,6 +557,21 @@ class Config:
     # Measured on the shipped book: 2022-2026 +74.5% -> +83.3%, MDD -4.60% ->
     # -4.39% (v17_nozt_yearly.py). Off until 文義 chooses it.
     limit_lock_rule = "stop"
+    # Whether to arm a stop leg at all. False means the only exits are the 12 pct
+    # take profit and the 13:20 time clear - the same mechanism "hold" already
+    # uses, applied to every position instead of only the limit-bound ones.
+    # This is not a cosmetic knob. The strategy's edge is that an over-gapped
+    # stock comes back; a stop sells exactly the part of the day that comes back.
+    # Measured on the shipped book with the labels corrected (v18_final.py):
+    #   with a stop   13yr +66.4%  2022-26 +74.5%  MDD -4.60%  worst trade -5.1%
+    #   without one   13yr +92.1%  2022-26 +113.9% MDD -4.72%  worst trade -13.1%
+    # (the no-stop column also uses brake 45/22, which is where its drawdown is
+    # back inside -5%; 50/25 with no stop is -5.09%). Win rate goes UP, 56.9% ->
+    # 60.1%, which is the tell: the stop was cutting trades that would have
+    # recovered. What you pay is the tail - trades losing more than 6% go from
+    # 0 to 5.5%, and the worst single trade goes from -5.1% to -13.1%. Off until
+    # 文義 chooses it.
+    use_stop_loss = True
     take_profit_pct = 0.12          # TP low
     take_profit_high_pct = 0.20     # TP high when q1 >= q1_tp_threshold
     q1_tp_threshold = 0.85
@@ -2720,7 +2735,8 @@ class GapFadeAutoTrader:
             # Only the limit-bound stops are affected. An ordinary 4% stop is a
             # price the market trades through, so it stays armed under both rules.
             sig._no_stop_leg = bool(
-                limit_bound and getattr(self.config, "limit_lock_rule", "stop") == "hold")
+                not getattr(self.config, "use_stop_loss", True)
+                or (limit_bound and getattr(self.config, "limit_lock_rule", "stop") == "hold"))
             sig.sl_price = 0.0 if sig._no_stop_leg else sl_price
 
             tp_pct = self._get_tp_pct(sig)

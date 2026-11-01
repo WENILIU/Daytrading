@@ -62,10 +62,11 @@ class FakeSK:
         return types.SimpleNamespace()
 
 
-def place(rule, entry, direction):
+def place(rule, entry, direction, use_sl=True):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
     t.config = G.Config()
     t.config.limit_lock_rule = rule
+    t.config.use_stop_loss = use_sl
     lg = logging.getLogger("o" + str(abs(hash((rule, entry, str(direction))))))
     lg.handlers = [logging.NullHandler()]
     t.log = lg
@@ -92,7 +93,7 @@ def place(rule, entry, direction):
         sig.tier = "T1"
         price, pct, bound = G.calc_effective_sl(entry, 500.0, direction, 0.04)
         sig._sl_pct = pct
-        sig._no_stop_leg = bool(bound and rule == "hold")
+        sig._no_stop_leg = bool(not use_sl or (bound and rule == "hold"))
         sig.sl_price = 0.0 if sig._no_stop_leg else price
         sig.tp_price = G.snap_to_valid_price(entry * (1 - 0.12)) if direction == G.Direction.SHORT \
             else G.snap_to_valid_price(entry * (1 + 0.12))
@@ -120,8 +121,18 @@ for rule in ("stop", "hold"):
     check(f"{rule}: an ordinary 4% stop stays armed regardless",
           o.nStopLossFlag == 1 and o.bstrSLTrigger == "530.0", (o.nStopLossFlag, o.bstrSLTrigger))
 
-check("the shipped default is unchanged", G.Config().limit_lock_rule == "stop",
-      G.Config().limit_lock_rule)
+check("the shipped default is unchanged", G.Config().limit_lock_rule == "stop"
+      and G.Config().use_stop_loss is True,
+      (G.Config().limit_lock_rule, G.Config().use_stop_loss))
+
+# use_stop_loss=False is the same mechanism as "hold", applied to every
+# position - so an ordinary 4% stop must also go unarmed, and the take profit
+# and the time clear must survive, because they are then the only exits.
+o, sig, _t = place("stop", 510.0, G.Direction.SHORT, use_sl=False)
+check("use_stop_loss=False unarms an ordinary 4% stop too",
+      o.nStopLossFlag == 0 and o.bstrSLTrigger == "0", (o.nStopLossFlag, o.bstrSLTrigger))
+check("use_stop_loss=False keeps the take profit and the 13:20 clear",
+      o.nTakeProfitFlag == 1 and o.nClearAllFlag == 1 and o.bstrClearCancelTime == "1320")
 
 
 # ---------- 3. an unarmed stop must not read as "already stopped" ----------

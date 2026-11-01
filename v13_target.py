@@ -90,9 +90,9 @@ print("signals %d, blocked by executability %d" % (len(D), int(D["blocked"].sum(
 
 
 def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
-        order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False,
+        order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False, nosl=False,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
-        part_delta=False, liq_ref=0.10, cap_pct=None):
+        part_delta=False, liq_ref=0.10, cap_pct=None, capture=False):
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
     # cap_pct is the per-order share of the book. Stage B showed the participation
     # cap is not what limits order size, so the only remaining size knob is this one.
@@ -113,6 +113,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     # numbers are quoted from, but a single year is too coarse to tell "the strategy
     # decayed" from "one bad month". Same yuan, same filters, one level finer.
     monthly = {}
+    # capture=True keeps every trade with the costs already netted off, so the
+    # risk questions yearly totals cannot answer - worst single trade, the shape of
+    # the loss tail, how often the exit is a force close - can be asked of the same
+    # book the headline numbers come from, not of a second implementation that drifts.
+    trades = []
     # deployment against the BOOK, not against the ceiling. This is the
     # number that decides whether margin is needed at all: if the maximum
     # stays under 100 pct the exposure ceiling only stops the capital check
@@ -151,12 +156,18 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 r["direction"], pr, float(r["day_high"]), float(r["day_low"]),
                 float(r["day_close"]), float(r["lu"]), float(r["ld"]),
                 float(r["tick"]), float(r["tp"]))
-            if nozt and reason.startswith("停損(觸"):
+            # nozt drops the stop only where the PRICE LIMIT sets it; nosl drops
+            # every stop. Both settle at the 13:25 price, which is what a force
+            # close costs, so they are charged FC_COST instead of SL_COST - except
+            # under nozt alone, which keeps paying SL_COST exactly as before so the
+            # published B numbers do not move when this parameter is added.
+            rewritten = (nozt and reason.startswith("停損(觸")) or (nosl and reason.startswith("停損"))
+            if rewritten:
                 dcl = float(r["day_close"])
                 gross = ((pr - dcl) / pr if r["direction"] == "SHORT" else (dcl - pr) / pr) - FC_COST
-            if reason == "13:25 強制平倉":
+            elif reason == "13:25 強制平倉":
                 gross -= FC_COST
-            if reason.startswith("停損"):
+            if reason.startswith("停損") and not (nosl and reason.startswith("停損")):
                 gross -= SL_COST
             pred = notional / (K_OPEN * dv1) if (np.isfinite(dv1) and dv1 > 0) else np.nan
             gross -= 2 * COST
@@ -172,6 +183,9 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
+            if capture:
+                trades.append((str(pd.Timestamp(d).date()), code, r["direction"],
+                               notional, gross, reason, pr, ex))
             mk = (int(pd.Timestamp(d).year), int(pd.Timestamp(d).month))
             mm = monthly.setdefault(mk, [0.0, 0, 0])
             mm[0] += notional * gross; mm[1] += 1
@@ -189,7 +203,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     return dict(yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
-                withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y)
+                withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades)
 
 def main():
     def show(label, cfg):
