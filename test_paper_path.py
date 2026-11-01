@@ -13,6 +13,7 @@ Exit code 0 means every assertion below held. It says nothing about whether the
 broker will accept an order tomorrow; those three gates can only be measured
 in a real session.
 """
+import os
 import subprocess
 import sys
 import time
@@ -31,6 +32,10 @@ SUITES = [
     ("_test_prestart_per_symbol.py",
      "a late-start exit is tagged _PRESTART per position, and a normal start "
      "still produces a genuine STOP_LOSS"),
+    ("_test_credit_line.py",
+     "the notional ceiling is min(equity x multiple, the broker's ABSOLUTE line); "
+     "this account has no financing, so 450 萬 is own cash and 1.90x is not "
+     "available at all - 855 萬 was a notional, never a line"),
     ("_test_entry_quote.py",
      "the entry is priced from the book at +Ns (buy at the ask, sell at the bid), a "
      "missing quote skips the order instead of falling back to the open, and the cost "
@@ -81,8 +86,15 @@ def main():
             continue
         t0 = time.perf_counter()
         try:
+            # Decode as UTF-8 on purpose. The children print Chinese, and text=True
+            # without an explicit encoding uses the local codepage (cp950 here), so a
+            # failing suite raised UnicodeDecodeError inside the reader thread and its
+            # actual assertion message was lost - the failure was still reported, but
+            # with no reason attached (measured 2026-11-01).
             r = subprocess.run([sys.executable, str(path)], cwd=str(HERE),
-                               capture_output=True, text=True, timeout=180)
+                               capture_output=True, text=True, timeout=180,
+                               encoding="utf-8", errors="replace",
+                               env={**os.environ, "PYTHONIOENCODING": "utf-8"})
             code, out = r.returncode, (r.stdout or "") + (r.stderr or "")
         except subprocess.TimeoutExpired:
             code, out = 124, "timed out after 180s"

@@ -593,10 +593,13 @@ class Config:
     # It does not make the orders bigger, only more numerous: participation p90 is
     # 6.6 pct at 1.00x and 7.2 pct at 2.00x, because the per-name liquidity cap sizes
     # the order, not the portfolio ceiling (v13_partcheck.py). Average deployment is
-    # 23 pct of the book; the ceiling binds only on the busiest days, so the margin
-    # line is a credit line, not a standing loan. Drop to 1.75 / 1.50 / 1.00 if the
-    # broker will not extend the line - the drawdown does not change.
-    max_total_exposure = 1.90
+    # 23 pct of the book; the ceiling binds only on the busiest days.
+    # 1.00 = 無融資. Measured 2026-11-01: the account is granted 450 萬 and the
+    # broker extends NO financing, so the notional ceiling is own cash and this
+    # multiple is 1.00. The 1.90 the research was tuned at needs a line this
+    # account does not have; the ladder and what each step costs is in
+    # STRATEGY_v13.md, and the drawdown does not change between them.
+    max_total_exposure = 1.00
     zt_bp1 = 0.015; zt_m1 = 10.0   # zt_dist < 1.5 pct  -> x10 (loss capped by limit-up)
     zt_bp2 = 0.045; zt_m2 = 2.5    # zt_dist < 4.5 pct  -> x2.5
     dd_th1 = 0.006; dd_scale1 = 0.30   # equity DD > 0.6 pct  -> x0.30
@@ -644,6 +647,16 @@ class Config:
     # never binds on performance; it only bounds API load and order races on freak days
     # (up to 545 candidates in one day).
     max_orders_per_day = 30
+
+    # ===== 券商額度（absolute, 單位是新臺幣）=====
+    # 2026-11-01 文義確認：帳戶被券商開的額度是 450 萬，而且沒有融資，超過就不能
+    # 再下單。所以這是名義部位的絕對上限，不是「可以借多少」：
+    #     名義上限 = min(淨值 x max_total_exposure, account_limit)
+    # 兩個上限各自綁的時機：淨值低於 450 萬時是自己的現金綁（虧損後部位隨之縮），
+    # 淨值高於 450 萬時是額度綁（等效倍數降到 450/淨值，會一路往 0 掉）。
+    # 之前寫「需融資額度 855 萬」是把名義當成額度：855 萬是 1.90x 的名義，不是額度。
+    # 這個帳戶拿不到 1.90x，能跑的曝險就是 1.00x。階梯與每档的報酬見 v15_credit.py。
+    account_limit = 4_500_000
     # --- paper mode (see GapFadePaperTrader) ---
     paper_poll_sec = 10         # simulated-fill resolution; 22 names batch in 0.47s
     paper_probe_zhang = 1       # probe order size in ZHANG (nQty is zhang, not shares)
@@ -2304,6 +2317,23 @@ class GapFadeAutoTrader:
                             "ask": lvl(q.get("asks"), False), "ts": time.time()}
         return out
 
+    def _effective_budget(self, equity: float) -> float:
+        """Today's notional ceiling: own cash, and never more than the broker's line.
+
+        Two ceilings, take the smaller. The first is the multiple the strategy runs
+        at (1.00 = no financing, so own cash). The second is account_limit, which is
+        an ABSOLUTE amount granted by the broker and does not compound with the
+        account. Below the line own cash binds, so a loss shrinks the book with it;
+        above the line the broker's line binds and the effective multiple falls
+        toward zero as equity grows - which is a property of the account, not of the
+        strategy. Measured 2026-11-01: the line is 4.5M with no financing, so at
+        4.5M of equity the two are equal and nothing is borrowed.
+        """
+        line = float(getattr(self.config, "account_limit", 0.0) or 0.0)
+        mult = float(self.config.max_total_exposure)
+        ceiling = equity * mult
+        return min(ceiling, line) if line > 0 else ceiling
+
     def _entry_from_quote(self, sig, quotes: dict) -> tuple:
         """A price the ticket can actually trade at, or why there is none.
 
@@ -2515,6 +2545,23 @@ class GapFadeAutoTrader:
         skipped_order_cap = 0
         skipped_no_quote = 0
 
+        ceiling = self._effective_budget(self._current_equity)
+        by_equity = self._current_equity * self.config.max_total_exposure
+        by_line = float(self.config.account_limit)
+        # Which one binds is the answer to "can I still add a ticket today", so it
+        # belongs in the log, not only in the close.
+        self.log.info(
+            f"  notional ceiling: {ceiling:,.0f} = min(淨值 x "
+            f"{self.config.max_total_exposure:.2f} = {by_equity:,.0f}, "
+            f"券商額度 {by_line:,.0f}) -> "
+            f"{'自有資金' if by_equity <= ceiling + 1 else '券商額度'} 綁住；"
+            f"需借款 {max(0.0, ceiling - self._current_equity):,.0f}")
+        self.exec_stats["budget_ceiling"] = {
+            "equity": self._current_equity, "ceiling": ceiling,
+            "by_equity_multiple": by_equity, "by_account_limit": by_line,
+            "binding": "own_cash" if by_equity <= ceiling + 1 else "account_limit",
+            "borrowing": max(0.0, ceiling - self._current_equity)}
+
         quotes = {}
         if not self.config.entry_at_open:
             # Path B. One batched book read for the whole signal set, at the entry
@@ -2622,7 +2669,7 @@ class GapFadeAutoTrader:
                 continue
 
             # Zero-margin hard cap: total notional <= equity (sequential, shrink to fit)
-            room = budget * self.config.max_total_exposure - total_exposure
+            room = self._effective_budget(budget) - total_exposure
             if room < shares * entry_price:
                 shares = int(max(0.0, room) / (entry_price * 1000)) * 1000
                 if shares < 1000:
@@ -3148,7 +3195,7 @@ class GapFadeAutoTrader:
         end_dt = force_exit_dt.replace(minute=force_exit_dt.minute + 5)
 
         while self.running:
-            now = datetime.now()
+            now = self._now()
             if now >= end_dt:
                 self.log.info("  All orders should be completed.")
                 break
@@ -3675,13 +3722,13 @@ class GapFadeAutoTrader:
     def _wait_until(self, time_str: str):
         """Wait until specified time"""
         target = self._parse_time(time_str)
-        now = datetime.now()
+        now = self._now()
         if now >= target:
             return
         wait_sec = (target - now).total_seconds()
         self.log.info(f"  Waiting {wait_sec:.0f}s until {time_str}...")
-        while datetime.now() < target:
-            remaining = (target - datetime.now()).total_seconds()
+        while self._now() < target:
+            remaining = (target - self._now()).total_seconds()
             time.sleep(min(10, max(1, remaining)))
 
     def _wait_for_quotes(self, min_stocks: int = 200, timeout_sec: int = 10):
@@ -3736,9 +3783,22 @@ class GapFadeAutoTrader:
                 idx += 1
         return count
 
-    @staticmethod
-    def _parse_time(time_str: str) -> datetime:
-        today = datetime.now().date()
+    def _now(self) -> datetime:
+        """The one clock the session loops read.
+
+        Every deadline in this class is derived from _parse_time, which is built
+        on top of this method. Any loop that reads the wall clock directly
+        instead compares two different clocks, and whichever one is stubbed in a
+        test decides the outcome. _test_pre.py stubs the clock to model a session
+        that started late; the monitor loop then compared that stub against a real
+        datetime.now(), so the same code passed at 22:3x and settled as
+        FORCE_CLOSE at 23:0x (measured 2026-11-01). Stub this one method and both
+        sides of every comparison agree.
+        """
+        return datetime.now()
+
+    def _parse_time(self, time_str: str) -> datetime:
+        today = self._now().date()
         h, m = map(int, time_str.split(":"))
         return datetime(today.year, today.month, today.day, h, m)
 
@@ -4270,7 +4330,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         self._canary_done = False
 
         while self.running:
-            now = datetime.now()
+            now = self._now()
             if now >= end_dt:
                 self.log.info("  Session window over.")
                 break
@@ -4909,6 +4969,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             "entry_delay_sec": self.exec_stats.get("entry_delay_sec", 0.0),
             "entry_delay_applied": self.exec_stats.get("entry_delay_applied", False),
             "entry_book_read": self.exec_stats.get("entry_book_read", {}),
+            "budget_ceiling": self.exec_stats.get("budget_ceiling", {}),
             "entry_cost_vs_open": self.exec_stats.get("entry_cost_vs_open", []),
             "orders": self.exec_stats.get("orders", []),
             "entry_slippage": self.exec_stats.get("entry_slippage", []),

@@ -1,4 +1,4 @@
-"""One iteration of the paper monitor, with the clock forced to a late start,
+﻿"""One iteration of the paper monitor, with the clock forced to a late start,
 to prove the PRESTART tag fires and settles at the level rather than the price."""
 import sys, time, warnings, logging, tempfile
 warnings.filterwarnings("ignore")
@@ -27,7 +27,12 @@ def fake_fetch(syms):
     t.running = False          # stop after one round
     return {"9999": 115.0}    # already well past the 111.3 stop
 t._fetch_prices = fake_fetch
-t._parse_time = lambda s: __import__("datetime").datetime.now().replace(hour=23, minute=0, second=0, microsecond=0)
+# One clock, stubbed to 09:10: the session is still inside its window, so the
+# monitor loop keeps running, but observation began 10 minutes after the open.
+# Stubbing the deadline while the loop read the real wall clock is what made
+# this test pass at 22:3x and fail at 23:0x with identical code (2026-11-01).
+t._now = lambda: __import__("datetime").datetime.now().replace(
+    hour=9, minute=10, second=0, microsecond=0)
 
 t.monitor_positions()
 tr = t.closed_trades[0]
