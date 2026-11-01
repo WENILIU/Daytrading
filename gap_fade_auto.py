@@ -590,6 +590,20 @@ class Config:
     paper_canary = True
     k_trail_scale = 0.02            # k_trail = clip(0.5 + trail30/0.02, 0.3, 2)
     equity_state_path = _HERE / "equity_state.json"
+    # Trading-book cap. Above this the profit is treated as withdrawn: the book
+    # is clamped back to the cap and the peak with it, so dd_scale only ever
+    # sees the book, never the money that has already left.
+    #
+    # This is not a risk feature, it is what makes the backtest mean anything.
+    # dd_scale is a function of the book's equity curve, so the account design
+    # (keep profits / take them out) changes the strategy, and any backtest that
+    # does not simulate the same design is describing a different account.
+    # Measured 2026-11-01 (v13_onebook.py, 2014-2026, all measured costs):
+    #   cap 450wan  wealth CAGR 22.2%  MDD -0.66%
+    #   cap 1yi     wealth CAGR 48.0%  MDD -3.09%   <- best inside -5 pct
+    #   no cap      wealth CAGR 68.3%  MDD -5.68%
+    # None = never withdraw, which is what this script did before 2026-11-01.
+    capital_cap = 100_000_000
 
     # --- Cost ---
     cost_per_trade = 0.00111  # 0.4 pct two-sided -> 0.2 pct/side x1.8 zhe + day-trade tax halved, per side
@@ -1330,6 +1344,7 @@ class GapFadeAutoTrader:
         # Equity drawdown control state
         self._peak_equity = config.capital
         self._current_equity = config.capital
+        self._withdrawn = 0.0
         self._load_equity_state()
 
     # ----------------------------------------------------------
@@ -3079,10 +3094,24 @@ class GapFadeAutoTrader:
 
         # Update equity state
         self._current_equity += total_pnl
+        cap = getattr(self.config, "capital_cap", None)
+        if cap is not None and self._current_equity > cap:
+            # The excess has left the trading book. It is not part of the curve
+            # dd_scale reads, and it must not raise the peak the next drawdown
+            # is measured against.
+            taken = self._current_equity - cap
+            self._withdrawn += taken
+            self._current_equity = cap
+            self.log.info(f"  Withdrawn {taken:,.0f} above the {cap:,.0f} book cap "
+                          f"(total withdrawn {self._withdrawn:,.0f})")
         if self._current_equity > self._peak_equity:
             self._peak_equity = self._current_equity
+        if cap is not None and self._peak_equity > cap:
+            self._peak_equity = cap
         self._save_equity_state()
-        self.log.info(f"  Equity: {self._current_equity:,.0f} (peak: {self._peak_equity:,.0f})")
+        wealth = self._current_equity + self._withdrawn
+        self.log.info(f"  Equity: {self._current_equity:,.0f} (peak: {self._peak_equity:,.0f}) "
+                      f"| book + withdrawn = {wealth:,.0f}")
 
     def _load_equity_state(self):
         """Load peak/current equity from persistent state file."""
@@ -3093,7 +3122,9 @@ class GapFadeAutoTrader:
                 state = json.loads(path.read_text(encoding='utf-8'))
                 self._peak_equity = state.get('peak_equity', self.config.capital)
                 self._current_equity = state.get('current_equity', self.config.capital)
-                self.log.info(f"  Loaded equity state: peak={self._peak_equity:,.0f} current={self._current_equity:,.0f}")
+                self._withdrawn = state.get('withdrawn', 0.0)
+                self.log.info(f"  Loaded equity state: peak={self._peak_equity:,.0f} "
+                              f"current={self._current_equity:,.0f} withdrawn={self._withdrawn:,.0f}")
         except Exception as e:
             self.log.warning(f"  Failed to load equity state: {e}")
 
@@ -3106,6 +3137,7 @@ class GapFadeAutoTrader:
             state = {
                 'peak_equity': self._peak_equity,
                 'current_equity': self._current_equity,
+                'withdrawn': self._withdrawn,
                 'updated': datetime.now().isoformat()
             }
             path.write_text(json.dumps(state, indent=2), encoding='utf-8')
@@ -3877,6 +3909,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             state = json.loads(path.read_text(encoding="utf-8"))
             self._peak_equity = state.get("peak_equity", self.config.capital)
             self._current_equity = state.get("current_equity", self.config.capital)
+            self._withdrawn = state.get("withdrawn", 0.0)
             self.log.info(f"  Loaded PAPER equity state: peak={self._peak_equity:,.0f} "
                           f"current={self._current_equity:,.0f}")
         except Exception as e:
@@ -3890,6 +3923,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
             path.write_text(json.dumps({
                 "peak_equity": self._peak_equity,
                 "current_equity": self._current_equity,
+                "withdrawn": self._withdrawn,
                 "updated": datetime.now().isoformat(),
                 "note": "paper mode - simulated PnL, deliberately NOT used by live",
             }, indent=2), encoding="utf-8")
