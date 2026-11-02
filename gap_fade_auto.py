@@ -550,27 +550,32 @@ class Config:
     # What to do when the price limit, not the 4 pct, is what sets the stop.
     #   "stop" (default, shipped): arm a stop at 漲停/跌停 - 1 tick.
     #   "hold"  : do not arm a stop at all; the 13:25 force close is the exit.
-    # "hold" is not extra risk. A buy order one tick under a locked limit-up sits
-    # behind the queue and does not fill, so for the 52% of these that are still
-    # pinned at 13:25 (1-minute bars, 2026-11-02) the "stop" price was never an
-    # obtainable price; "hold" settles them at the limit itself, one tick worse.
-    # Measured on the shipped book: 2022-2026 +74.5% -> +83.3%, MDD -4.60% ->
-    # -4.39% (v17_nozt_yearly.py). Off until 文義 chooses it.
+    # The old reason for choosing "hold" ("it only settles them one tick worse") no
+    # longer holds: a short still pinned at 13:25 does not get the limit price either,
+    # it gets the next day's open, measured -3.149 pct (v19_pincalc.py). BOTH settings
+    # pay that, because the pinned count is the same whether the stop is armed or not
+    # (STRATEGY_v13.md, "鎖在價限的單回不了補"), so this knob no longer decides how much
+    # of that risk is taken. What it still changes is the limit-bound trades that DO
+    # unlock. The numbers on this comment (+74.5% -> +83.3%, MDD -4.60% -> -4.39%,
+    # v17_nozt_yearly.py) were measured on a pin cost about a third of the real one and
+    # have to be re-run before this is chosen. Off until 文義 chooses it.
     limit_lock_rule = "stop"
     # Whether to arm a stop leg at all. False means the only exits are the 12 pct
     # take profit and the 13:20 time clear - the same mechanism "hold" already
     # uses, applied to every position instead of only the limit-bound ones.
     # This is not a cosmetic knob. The strategy's edge is that an over-gapped
     # stock comes back; a stop sells exactly the part of the day that comes back.
-    # Measured on the shipped book with the labels corrected (v18_final.py):
-    #   with a stop   13yr +66.4%  2022-26 +74.5%  MDD -4.60%  worst trade -5.1%
-    #   without one   13yr +92.1%  2022-26 +113.9% MDD -4.72%  worst trade -13.1%
-    # (the no-stop column also uses brake 45/22, which is where its drawdown is
-    # back inside -5%; 50/25 with no stop is -5.09%). Win rate goes UP, 56.9% ->
-    # 60.1%, which is the tell: the stop was cutting trades that would have
-    # recovered. What you pay is the tail - trades losing more than 6% go from
-    # 0 to 5.5%, and the worst single trade goes from -5.1% to -13.1%. Off until
-    # 文義 chooses it.
+    # Re-measured 2026-11-02 with the pin cost charged per side and the order cap at
+    # 20, which is the only place either book is inside -5 pct (v19_ordercap.py,
+    # v19_ordercap2.py; gap ceiling 0.040, brake 50/25 at -0.008/-0.016 for the
+    # no-stop column - the count cap, not the brake, is what holds the drawdown):
+    #   with a stop   13yr +46.8%  2022-26 +45.2%  MDD -4.09%
+    #   without one   13yr +74.2%  2022-26 +81.8%  MDD -4.80%
+    # ~36 pp of recent return for 0.7 pp of drawdown. What you pay is the tail: with
+    # no stop the worst single trade goes from about -5 pct to -13 pct, and the
+    # overnight pin is what makes that tail real rather than a number on a bar.
+    # The earlier pair on this comment (+66.4% / +92.1% 13yr) was measured on a pin
+    # cost about a third of the real one. Off until 文義 chooses it.
     use_stop_loss = True
     take_profit_pct = 0.12          # TP low
     take_profit_high_pct = 0.20     # TP high when q1 >= q1_tp_threshold
@@ -676,12 +681,22 @@ class Config:
     # -5 pct once the entry cost is the measured one rather than the old curve.
     # The measured participation p90 falls from 10.2 pct to 6.8 pct.
     max_open_participation = 0.10
-    # Operational safety net only, NOT a performance rule. There is no count limit in the
-    # strategy: capital (zero margin) is the gate. Measured on 2014-2026 (count_cap.py):
-    # 34 candidates/day pass the filters, 9.4 get funded, p99 = 22, max = 26. 30 therefore
-    # never binds on performance; it only bounds API load and order races on freak days
-    # (up to 545 candidates in one day).
-    max_orders_per_day = 30
+    # A count limit, and it IS a risk rule now (2026-11-02, v19_ordercap.py). It used to
+    # be sized as a pure API-load guard: count_cap.py measured 34 candidates/day pass the
+    # filters, 9.4 get funded, p99 = 22, max = 26, so 30 "never binds on performance".
+    # That was true while the book settled a locked short at the limit price. Once the pin
+    # cost is charged honestly (v19_pincalc.py: a short still pinned at 13:25 exits at the
+    # next day's open, -3.149 pct on average, 85.8 pct of them gapping up), the count is
+    # what decides the worst day. Same book, gap ceiling 0.040, nothing else changed -
+    # position MDD / 2022-2026 return:
+    #     stop armed (this config):  cap 30  -7.25%  +48.0%  ->  cap 20  -4.09%  +45.2%
+    #     stop removed (pending)   :  cap 30  -6.59%  +83.6%  ->  cap 20  -4.80%  +81.8%
+    # It is not proportional de-risking. The cap drops the LOWEST ranked signals, and on a
+    # one-direction squeeze morning those are the marginal, worst shorts - so it cuts the
+    # tail faster than the mean. It binds on roughly one morning in ten and costs about
+    # 2 pp of return everywhere else. Lowering it also reduces the 22-orders-per-day send
+    # risk in LIVE_READINESS.md rather than adding to it.
+    max_orders_per_day = 20
 
     # ===== 券商額度（absolute, 單位是新臺幣）=====
     # 2026-11-01 文義確認：帳戶被券商開的額度是 450 萬，而且沒有融資，超過就不能

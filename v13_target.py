@@ -80,6 +80,26 @@ ENTRY_COST = {
 }
 SPREAD = 0.00105   # closing half-spread, median of 11 names measured 2026-10-30
 
+# A trade that ends pinned on a price limit cannot be cleared at 13:20, and the
+# backtest settles it at the limit - the price nobody traded. The real exit is the
+# next day's open. Measured on the 893 price-limit-bound trades walked through the
+# 1-minute bars (v19_overnight.py / v19_pincalc.py, 2023-06..2026-10): 32.3 pct were
+# still pinned at 13:25, and carrying THOSE cost SHORT -3.149 pct (n=219, 85.8 pct
+# gapped up at the next open, p05 -10.08, worst -54.72) and LONG +0.349 pct (n=69).
+# These are the CONDITIONAL values, which is what the charge in run() needs, because
+# that branch only runs on trades that are pinned. The flat 0.00747 used before this
+# is 0.323 x 2.311 - the mean over everything that TOUCHED a limit - and was ~3x too
+# small on the side that actually pays it.
+#
+# LONG is charged 0, not the measured +0.349 credit: n=69 and it swings by year
+# (2024 -3.90, 2025 +1.63, 2026 +0.28), so a credit there would be fitting noise.
+#
+# They are the DEFAULT now. Every number in this file's history before 2026-11-02
+# was measured on a cost about a third of the real one, and a default of 0 meant
+# every new script had to remember to ask.
+PIN_SHORT_MEASURED = 0.03149
+PIN_LONG_MEASURED = 0.0
+
 
 def entry_cost(direction, gap, spread=SPREAD):
     g = abs(float(gap))
@@ -93,7 +113,17 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False, nosl=False,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
         part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
-        pin_penalty=0.0, max_lock_rate=None, dir_cap=None):
+        pin_penalty=None, max_lock_rate=None, dir_cap=None,
+        pin_short=None, pin_long=None, zt_min_dist=None):
+    # Pin cost resolution. Defaults are the measured per-side values (see
+    # PIN_SHORT_MEASURED above). pin_penalty is the legacy single-number override and
+    # still means what it always did: pin_penalty=0 turns the charge off, which is how
+    # the pre-2026-11-02 numbers are reproduced. pin_short / pin_long override one
+    # side each.
+    both = PIN_SHORT_MEASURED if pin_penalty is None else float(pin_penalty)
+    ps = both if pin_short is None else float(pin_short)
+    pl = (PIN_LONG_MEASURED if pin_penalty is None else both) if pin_long is None \
+        else float(pin_long)
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
     # cap_pct is the per-order share of the book. Stage B showed the participation
     # cap is not what limits order size, so the only remaining size knob is this one.
@@ -110,9 +140,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     b1, b2 = (brake if brake is not None else (0.0, 0.0))
     book = float(CAP0); peak = float(CAP0); withdrawn = 0.0
     yearly = {}; worst_dd = 0.0; n_all = 0; brake_days = 0; expo = []; parts = []
-    n_pin = 0  # trades that end pinned on a price limit; see pin_penalty
+    n_pin = 0  # trades charged a pin cost; see pin_short / pin_long
+    n_pin_dir = {"SHORT": 0, "LONG": 0}  # pinned population by side, charged or not
     n_lockskip = 0  # signals skipped by max_lock_rate; see the lock filter
     n_dircap = 0  # signals skipped because that direction was already full
+    n_ztskip = 0  # signals skipped by zt_min_dist; see below
     # monthly[y, m] = [yuan, trades, winners]. The yearly book is what the headline
     # numbers are quoted from, but a single year is too coarse to tell "the strategy
     # decayed" from "one bad month". Same yuan, same filters, one level finer.
@@ -174,6 +206,23 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                     n_lockskip += 1
                     continue
             pr = float(r["entry"]); code = str(r["stock"])
+            # The gap ceiling only reaches the pin cost indirectly. What actually
+            # decides whether a trade can end pinned is how far the price limit is
+            # from the entry: a SHORT entered 1 pct under the upper limit has almost
+            # no room before the exit becomes unfillable, and the honest price for
+            # that (v19_pincalc.py) is the next day's open, not the limit. gap_max
+            # is a proxy for this on a market-adjusted scale, and the two are not the
+            # same number - adj_gap subtracts the market move, the limit does not
+            # care about the market move. zt_min_dist is the quantity itself, and
+            # live can compute it at 09:00 because the limit is set by T close.
+            if zt_min_dist is not None:
+                if r["direction"] == "SHORT":
+                    zdist = (float(r["lu"]) - pr) / pr
+                else:
+                    zdist = (pr - float(r["ld"])) / pr
+                if zdist < zt_min_dist:
+                    n_ztskip += 1
+                    continue
             w = float(r["_weight"]) / (float(r["_rs"]) or 1.0) * rs
             if gap_scale != 1.0 and ag >= 0.07:
                 w *= gap_scale
@@ -223,18 +272,25 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             # A trade that ends pinned on a price limit cannot be cleared at 13:20,
             # and the backtest has been settling it at the limit price - the price
             # nobody traded. Measured on 893 price-limit-bound trades walked through
-            # the 1-minute bars (v19_overnight.py, 2023-06..2026-10): 32.3 pct were
-            # still pinned at 13:25, and carrying those to the next open cost -2.311
-            # pct of notional on average (SHORT -3.149, LONG +0.349, only 18.1 pct
-            # would have been better carried). pin_penalty is that number; 0 keeps
-            # the old behaviour. It is a return-side cost, not a fee: it is the
-            # difference between the price we assumed and the price we would get.
-            if pin_penalty:
+            # the 1-minute bars (v19_overnight.py / v19_pincalc.py, 2023-06..2026-10):
+            # 32.3 pct were still pinned at 13:25, and carrying THOSE to the next open
+            # cost SHORT -3.149 pct and LONG +0.349 pct of notional. That conditional
+            # value is what belongs here, because this branch only runs on trades that
+            # ARE pinned - the earlier flat 0.00747 was the unconditional average over
+            # everything that touched a limit, so it was ~3x too small on the side that
+            # actually pays it and charged the other side for nothing. It is a
+            # return-side cost, not a fee: the difference between the price the
+            # backtest assumed (the limit, which nobody traded) and the price it would
+            # really have got (the next day's open).
+            if ps or pl:
                 cl_ = float(r["day_close"])
                 if ((r["direction"] == "SHORT" and cl_ >= float(r["lu"]) - 1e-9)
                         or (r["direction"] == "LONG" and cl_ <= float(r["ld"]) + 1e-9)):
-                    gross -= pin_penalty
-                    n_pin += 1
+                    n_pin_dir[r["direction"]] += 1
+                    pen = ps if r["direction"] == "SHORT" else pl
+                    if pen:
+                        gross -= pen
+                        n_pin += 1
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; rem_dir[r["direction"]] -= notional
@@ -260,7 +316,9 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
                 withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades,
-                n_pin=n_pin, n_lockskip=n_lockskip, n_dircap=n_dircap)
+                n_pin=n_pin, n_pin_dir=n_pin_dir, n_lockskip=n_lockskip,
+                n_ztskip=n_ztskip,
+                n_dircap=n_dircap)
 
 def main():
     def show(label, cfg):
