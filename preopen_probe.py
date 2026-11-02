@@ -26,6 +26,11 @@ intraday.quote 只有 24 个字段、其中只有 referencePrice，**没有委�
   python preopen_probe.py --now      # 立刻跑一轮（盘后也能跑，用来看字段与送单结果）
   python preopen_probe.py --no-orders  # 只读竞价，完全不向券商送单
         问题 2、3 需要真单，这天就没有答案；问题 1（指示价与竞价深度）照样量得到
+  python preopen_probe.py --arm --no-orders  # 睡到下一个交易日 08:44 再自己跑
+        早上那个排程不是每次都真的把事情做出来（2026-10-29、10-30 準時觸發但磁碟上沒有
+        東西；2026-11-02 觸發時已經 08:49，視窗已過）。--arm 讓它可以在前一晚就被啟動，
+        不依賴那個排程。醒來若已過 09:00:30 會明確說「視窗已過」並離開，不會寫一份
+        空檔案讓人讀成「盤前沒有報價」。
 """
 import sys, os, csv, time, re, math, datetime, warnings
 warnings.filterwarnings("ignore")
@@ -47,6 +52,7 @@ NOW = "--now" in sys.argv
 # indicative price and the depth) is measured either way. Off by default only
 # because the two tickets are real and the self-cancel is best effort.
 SEND_ORDERS = "--no-orders" not in sys.argv
+ARM = "--arm" in sys.argv
 FUGLE_KEY = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
 
 
@@ -264,9 +270,54 @@ def booked_day(msg):
     return m.group(1) if m else ""
 
 
+def _is_session(d):
+    """True/False for a date, or None when the calendar cannot be read. None must
+    never be treated as False - morning_chain.py:46 makes the same point about a
+    finlab outage: an outage is not evidence that today is not a trading day."""
+    try:
+        from finlab import data as fdata
+        from gap_fade_auto import _ensure_finlab_login
+        if not _ensure_finlab_login():
+            return None
+        return bool(fdata.get_calendar().is_session(d))
+    except Exception:
+        return None
+
+
+def arm_target():
+    """The next trading session's 08:44 that is strictly after now, or None."""
+    probe = datetime.datetime.now()
+    for _ in range(20):
+        cand = probe.replace(hour=START[0], minute=START[1], second=0, microsecond=0)
+        if cand > datetime.datetime.now() and _is_session(cand.date()):
+            return cand
+        probe = (probe + datetime.timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+    return None
+
+
 def main():
     now = datetime.datetime.now()
-    if not NOW:
+    if ARM:
+        target = arm_target()
+        if target is None:
+            print("cannot read the trading calendar - not arming, so nothing waits "
+                  "on a guess. Run without --arm to start now.")
+            return 1
+        print("armed: sleeping until %s %02d:%02d (started %s)"
+              % (target.date(), START[0], START[1], now))
+        while datetime.datetime.now() < target:
+            time.sleep(min(30, (target - datetime.datetime.now()).total_seconds()))
+        # A machine that slept through the night wakes late, and a late start here is
+        # not a partial measurement - it is a different question. Say so and stop
+        # rather than write an empty CSV that reads as "no quotes before the open".
+        if datetime.datetime.now() > datetime.datetime.now().replace(
+                hour=STOP[0], minute=STOP[1], second=STOP[2], microsecond=0):
+            print("window missed: it is already %s, past %02d:%02d:%02d. Nothing "
+                  "written - the three questions stay unanswered for today."
+                  % (datetime.datetime.now().strftime("%H:%M:%S"), STOP[0], STOP[1], STOP[2]))
+            return 1
+    elif not NOW:
         target = now.replace(hour=START[0], minute=START[1], second=0, microsecond=0)
         while now < target:
             time.sleep(min(20, (target - now).total_seconds()))
