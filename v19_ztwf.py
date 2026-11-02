@@ -23,11 +23,10 @@ ORIG_GROUPS = T.GROUPS
 def summarize(tag, y):
     yr = y["yearly"]; v = {k: yr[k] / CAP * 100 for k in yr}
     mi = np.mean([v[k] for k in IN if k in v]); mo = np.mean([v[k] for k in OUT if k in v])
-    print("%-22s  2014-21 %+7.1f%%  MDD %6.2f%% | 2022-26 %+7.1f%%  MDD %6.2f%%  比值 %5.1f  筆/日 %4.1f"
-          % (tag, mi, y["mdd"], mo, mo / abs(y["mdd"]) if y["mdd"] else 0, y["per_day"]), flush=True)
+    print("%-22s  2014-21 %+7.1f%% | 2022-26 %+7.1f%%  全期MDD %6.2f%%  持有期比值 %5.1f  筆/日 %4.1f"
+          % (tag, mi, mo, y["mdd"], mo / abs(y["mdd"]) if y["mdd"] else 0, y["per_day"]), flush=True)
     return dict(tag=tag, insample=mi, mdd_all=y["mdd"], outsample=mo,
                 ratio_out=mo / abs(y["mdd"]), per_day=y["per_day"])
-
 rows = []
 print("selection window 2014-2021, holdout 2022-2026", flush=True)
 T.GROUPS = ORIG_GROUPS
@@ -40,3 +39,5 @@ print("\n選出的門檻 (僅看 2014-2021): %s  樣本內 %+0.1f%%  持有期 %
       % (df.loc[best, "tag"], df.loc[best, "insample"], df.loc[best, "outsample"]), flush=True)
 df.to_csv("_ztwf.csv", index=False)
 print("saved _ztwf.csv", flush=True)
+
+
