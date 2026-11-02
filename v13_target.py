@@ -114,7 +114,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
         part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
         pin_penalty=None, max_lock_rate=None, dir_cap=None,
-        pin_short=None, pin_long=None, zt_min_dist=None):
+        pin_short=None, pin_long=None, zt_min_dist=None, size_scale=1.0):
     # Pin cost resolution. Defaults are the measured per-side values (see
     # PIN_SHORT_MEASURED above). pin_penalty is the legacy single-number override and
     # still means what it always did: pin_penalty=0 turns the charge off, which is how
@@ -125,6 +125,14 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     pl = (PIN_LONG_MEASURED if pin_penalty is None else both) if pin_long is None \
         else float(pin_long)
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
+    # size_scale multiplies the model weight, so it is "the same signals, bigger".
+    # It is not the same lever as `exposure`, which is a ceiling on the day's total:
+    # scale raises the size of orders that were never near a ceiling, and leaves the
+    # concentrated days where the cash is already gone exactly where they were. With
+    # mean deployment at 36 pct of the book and the worst day at 99 pct, that
+    # asymmetry is the only remaining way to buy return without buying the tail.
+    if size_scale != 1.0:
+        rule["scale"] = float(size_scale)
     # cap_pct is the per-order share of the book. Stage B showed the participation
     # cap is not what limits order size, so the only remaining size knob is this one.
     if cap_pct is not None:
@@ -314,7 +322,9 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         expo_book.append((book * exposure - rem) / book)
     return dict(yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
-                expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
+                expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100,
+                expo_pct={q: float(np.percentile(expo_book, q)) * 100
+                          for q in (50, 75, 90, 95, 99)} if expo_book else {}, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
                 withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades,
                 n_pin=n_pin, n_pin_dir=n_pin_dir, n_lockskip=n_lockskip,
                 n_ztskip=n_ztskip,
