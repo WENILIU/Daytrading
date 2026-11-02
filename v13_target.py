@@ -162,9 +162,15 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             # under nozt alone, which keeps paying SL_COST exactly as before so the
             # published B numbers do not move when this parameter is added.
             rewritten = (nozt and reason.startswith("停損(觸")) or (nosl and reason.startswith("停損"))
+            reason_eff = reason
             if rewritten:
                 dcl = float(r["day_close"])
                 gross = ((pr - dcl) / pr if r["direction"] == "SHORT" else (dcl - pr) / pr) - FC_COST
+                # The label has to follow the settlement, not the order that was
+                # cancelled. Drivers count exit reasons off `trades`, so the old label
+                # made the no-stop book still report 6,354 stop-loss exits (2026-11-02,
+                # same class of bug as the feea715 price-limit label fix).
+                reason_eff = "13:25 ping-cang(no stop)" if nosl else "13:25 ping-cang(limit-bound stop not executable)"
             elif reason == "13:25 強制平倉":
                 gross -= FC_COST
             if reason.startswith("停損") and not (nosl and reason.startswith("停損")):
@@ -185,7 +191,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
             if capture:
                 trades.append((str(pd.Timestamp(d).date()), code, r["direction"],
-                               notional, gross, reason, pr, ex))
+                               notional, gross, reason_eff, pr, ex))
             mk = (int(pd.Timestamp(d).year), int(pd.Timestamp(d).month))
             mm = monthly.setdefault(mk, [0.0, 0, 0])
             mm[0] += notional * gross; mm[1] += 1
