@@ -93,7 +93,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False, nosl=False,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
         part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
-        pin_penalty=0.0, max_lock_rate=None):
+        pin_penalty=0.0, max_lock_rate=None, dir_cap=None):
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
     # cap_pct is the per-order share of the book. Stage B showed the participation
     # cap is not what limits order size, so the only remaining size knob is this one.
@@ -112,6 +112,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     yearly = {}; worst_dd = 0.0; n_all = 0; brake_days = 0; expo = []; parts = []
     n_pin = 0  # trades that end pinned on a price limit; see pin_penalty
     n_lockskip = 0  # signals skipped by max_lock_rate; see the lock filter
+    n_dircap = 0  # signals skipped because that direction was already full
     # monthly[y, m] = [yuan, trades, winners]. The yearly book is what the headline
     # numbers are quoted from, but a single year is too coarse to tell "the strategy
     # decayed" from "one bad month". Same yuan, same filters, one level finer.
@@ -142,6 +143,16 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         if rs < 1.0:
             brake_days += 1
         rem = book * exposure; n_day = 0; yuan = 0.0
+        # The only drawdown this strategy actually has is a single one-sided day
+        # (2021-05-18: 29 of 30 trades SHORT, 447 wan notional, -5.00 pct in one
+        # session while the market rose 1.46 pct). An equity-drawdown brake cannot
+        # act on it - that morning the book was at its peak, so full size was the
+        # designed answer, and the brake only reacts the next day. Direction
+        # concentration does not predict it either (corr 0.026), so the lever has
+        # to be a pre-trade cap on how much one direction may hold. dir_cap is that
+        # fraction of the line; None leaves the old behaviour of one shared budget.
+        rem_dir = {"SHORT": rem if dir_cap is None else book * dir_cap,
+                   "LONG": rem if dir_cap is None else book * dir_cap}
         for _, r in GROUPS[d].sort_values("_rank").iterrows():
             if n_day >= order_cap:
                 break
@@ -167,7 +178,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             if gap_scale != 1.0 and ag >= 0.07:
                 w *= gap_scale
             dv1 = float(TO1.at[d, code]) if (code in TO1.columns and d in TO1.index) else np.nan
-            n = S.lots_for(rule, w, pr, rem, dv1, capital=book)
+            if dir_cap is not None and rem_dir[r["direction"]] <= 0.0:
+                n_dircap += 1
+                continue
+            n = S.lots_for(rule, w, pr, min(rem, rem_dir[r["direction"]]), dv1,
+                           capital=book)
             if n <= 0:
                 continue
             notional = n * 1000.0 * pr
@@ -222,7 +237,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                     n_pin += 1
             if np.isfinite(pred):
                 parts.append(pred)
-            rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
+            rem -= notional; rem_dir[r["direction"]] -= notional
+            yuan += notional * gross; n_day += 1; n_all += 1
             if capture:
                 trades.append((str(pd.Timestamp(d).date()), code, r["direction"],
                                notional, gross, reason_eff, pr, ex))
@@ -244,7 +260,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
                 withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades,
-                n_pin=n_pin, n_lockskip=n_lockskip)
+                n_pin=n_pin, n_lockskip=n_lockskip, n_dircap=n_dircap)
 
 def main():
     def show(label, cfg):
