@@ -24,6 +24,8 @@ intraday.quote 只有 24 个字段、其中只有 referencePrice，**没有委�
 用法：
   python preopen_probe.py            # 自己等到 08:44 开始
   python preopen_probe.py --now      # 立刻跑一轮（盘后也能跑，用来看字段与送单结果）
+  python preopen_probe.py --no-orders  # 只读竞价，完全不向券商送单
+        问题 2、3 需要真单，这天就没有答案；问题 1（指示价与竞价深度）照样量得到
 """
 import sys, os, csv, time, re, math, datetime, warnings
 warnings.filterwarnings("ignore")
@@ -40,6 +42,11 @@ INTERVAL = 2.0
 START = (8, 44, 0)
 STOP = (9, 0, 30)
 NOW = "--now" in sys.argv
+# --no-orders: read the auction without touching the broker. Questions 2 and 3
+# need a real ticket, so with this flag they stay unanswered; question 1 (the
+# indicative price and the depth) is measured either way. Off by default only
+# because the two tickets are real and the self-cancel is best effort.
+SEND_ORDERS = "--no-orders" not in sys.argv
 FUGLE_KEY = "MmRkMTA5OWUtNjM3OS00YmQ5LTk4ZWMtNTYzOGQyMjY5MWY2IGIyYTNhYWY5LTcxY2ItNGUyMy04NTVhLTU0ZDhkNzE2ZjM1Mw=="
 
 
@@ -415,22 +422,35 @@ def main():
             print("    entry has to be priced from the gap rule alone.")
         if not NOW and not did_plain and hhmm >= "0855":
             did_plain = True
+            if not SEND_ORDERS:
+                print("[4] 08:55 plain order SKIPPED (--no-orders): questions 2 and 3")
+                print("    need a real ticket, so they stay unanswered today.")
+                orders.append({"api": "SendStockOrder", "code": None,
+                               "msg": "SKIPPED by --no-orders", "ts": stamp.isoformat()})
             px = round(prev_close.get(ORDER_SYM, 100) * 0.90, 2)
-            print("[4] 08:55 plain order: buy 1 zhang %s @ %s (跌停附近, 不会成交)" % (ORDER_SYM, px))
-            r = send_plain(trader, ORDER_SYM, px)
-            r["ts"] = stamp.isoformat(); r["price"] = px
-            orders.append(r)
-            print("    code=%s msg=%s" % (r["code"], r["msg"][:200]))
+            if SEND_ORDERS:
+                print("[4] 08:55 plain order: buy 1 zhang %s @ %s (跌停附近, 不会成交)" % (ORDER_SYM, px))
+            if SEND_ORDERS:
+                r = send_plain(trader, ORDER_SYM, px)
+                r["ts"] = stamp.isoformat(); r["price"] = px
+                orders.append(r)
+                print("    code=%s msg=%s" % (r["code"], r["msg"][:200]))
         if not NOW and not did_smart and hhmm >= "0856":
             did_smart = True
+            if not SEND_ORDERS:
+                orders.append({"api": "SendStockStrategyDayTrade", "code": None,
+                               "msg": "SKIPPED by --no-orders", "ts": stamp.isoformat(),
+                               "smart_key": None, "booked_day": None})
             px = round(prev_close.get(ORDER_SYM, 100) * 0.90, 2)
-            print("[5] 08:56 smart order: same ticket live sends, 1 zhang @ %s" % px)
-            r = send_smart(trader, ORDER_SYM, px, round(px * 1.04, 2), round(px * 0.93, 2))
-            r["ts"] = stamp.isoformat(); r["price"] = px
-            r["smart_key"] = _parse_smart_key(r["msg"]); r["booked_day"] = booked_day(r["msg"])
-            orders.append(r)
-            print("    code=%s key=%s booked_day=%s msg=%s"
-                  % (r["code"], r["smart_key"], r["booked_day"], r["msg"][:200]))
+            if SEND_ORDERS:
+                print("[5] 08:56 smart order: same ticket live sends, 1 zhang @ %s" % px)
+            if SEND_ORDERS:
+                r = send_smart(trader, ORDER_SYM, px, round(px * 1.04, 2), round(px * 0.93, 2))
+                r["ts"] = stamp.isoformat(); r["price"] = px
+                r["smart_key"] = _parse_smart_key(r["msg"]); r["booked_day"] = booked_day(r["msg"])
+                orders.append(r)
+                print("    code=%s key=%s booked_day=%s msg=%s"
+                      % (r["code"], r["smart_key"], r["booked_day"], r["msg"][:200]))
 
         time.sleep(max(0.5, INTERVAL - (time.time() - t0)))
 
