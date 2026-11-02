@@ -2433,3 +2433,32 @@ paper 量不到这件事（探測單的價格是故意掛成不會成交的）�
 **開盤日要看什麼：** 日誌裡的 `entry price vs the open` 那三列（p50/p90/mean）拿去對
 `v13_target.ENTRY_COST` 同方向的數字；`Skipped (no entry quote...)` 的計數；以及
 `entry_delay_applied` 必須是 True（False 代表是晚啟動，那個成本數字不屬於 +60s）。
+
+
+### 11.30 探測單關掉之後，模擬書在開盤那一刻就空了（2026-11-02 早上，`gap_fade_auto.py`）
+
+文義要求先不要實際下單。把 `Config.paper_send_probe_orders` 設成 False 之後，
+`_place_entry_order` 不再呼叫父層的送單，而**父層是在收到 code 0 的 ack 時才把
+`sig.state` 設成 FILLED**（`gap_fade_auto.py:3234`）。跳過送單，訊號就停在 PENDING。
+`monitor_positions()` 的過濾條件是 `state in (FILLED, MONITORING)`
+（`gap_fade_auto.py:4424`），於是它看到一本空的書，直接印
+`All paper positions resolved.` 並結束。
+
+實測在 09:10:46：日誌先寫 `Orders placed: 7`、`Total exposure: 4,463,150 (99%)`，
+同一秒就寫 `simulated book: no trades today`，27 秒後 `Disconnected.`。
+報告裡 `entry slippability: not measured (no positions)`。
+**表面上一片綠（沒有 FAIL 是新的），實際上那天什麼都沒模擬。**
+
+這正是 `_place_entry_order` 那段註解（`gap_fade_auto.py:4358`）當初在防的同一件事，
+只是換了一個觸發條件：以前是「探測單被 924 全部拒掉」，現在是「根本沒有探測單」。
+修法是在 probe OFF 那條分支直接把 `sig.state = PositionState.FILLED` ——
+券商那邊不存在這張單，所以那筆模擬單**定義上就是部位**，沒有「等不被承認」的狀態可言。
+
+**代價要分開算。** 關掉探測單只讓三道閘門裡的兩道失去樣本（送單接受率、accept 路徑
+ack 延遲），加上智慧單通道讀不到東西；**開盤滑價與模擬書不受影響**，那兩項本來就不
+依賴送單被承認。修好之後 09:14 重跑，8 筆部位正常開倉，`entry check: intended X vs
+first price Y` 逐筆都有，報告照寫。所以「不下單」的代價只有那兩道，不是整個試跑。
+
+**離線測試：** `_test_limit_lock.py` 的 `place()` 增加 `send_probe` 參數，新增三條斷言：
+probe OFF 時不送任何單、部位仍然被開起來、`exec_stats["orders"]` 必須是空的
+（接受率閘門因此是「沒有樣本」而不是 0%）。該組 24/24，`test_paper_path.py` 17/17。
