@@ -92,7 +92,8 @@ print("signals %d, blocked by executability %d" % (len(D), int(D["blocked"].sum(
 def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         order_cap=30, brake=((-0.03, 0.30), (-0.06, 0.12)), nozt=False, nosl=False,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
-        part_delta=False, liq_ref=0.10, cap_pct=None, capture=False):
+        part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
+        pin_penalty=0.0, max_lock_rate=None):
     rule = dict(BASE); rule["dv_cap"] = K_OPEN * liq
     # cap_pct is the per-order share of the book. Stage B showed the participation
     # cap is not what limits order size, so the only remaining size knob is this one.
@@ -109,6 +110,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     b1, b2 = (brake if brake is not None else (0.0, 0.0))
     book = float(CAP0); peak = float(CAP0); withdrawn = 0.0
     yearly = {}; worst_dd = 0.0; n_all = 0; brake_days = 0; expo = []; parts = []
+    n_pin = 0  # trades that end pinned on a price limit; see pin_penalty
+    n_lockskip = 0  # signals skipped by max_lock_rate; see the lock filter
     # monthly[y, m] = [yuan, trades, winners]. The yearly book is what the headline
     # numbers are quoted from, but a single year is too coarse to tell "the strategy
     # decayed" from "one bad month". Same yuan, same filters, one level finer.
@@ -129,7 +132,13 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         cdd = (book - peak) / peak
         rs = 1.0
         if b1:
-            rs = b1[1] if cdd < b1[0] else (b2[1] if (b2 and cdd < b2[0]) else 1.0)
+            # deepest tier first. b2[0] < b1[0], so testing b1 first made the
+            # deep tier unreachable: cdd < b2[0] always implies cdd < b1[0]. The
+            # backtest was therefore simulating a LOOSER brake than live runs -
+            # gap_fade_auto.py:2664 checks dd_th2 before dd_th1 and is correct.
+            # Every brake number quoted before 2026-11-02 was measured against the
+            # single-tier version. (found while re-tuning against the pin cost)
+            rs = b2[1] if (b2 and cdd < b2[0]) else (b1[1] if cdd < b1[0] else 1.0)
         if rs < 1.0:
             brake_days += 1
         rem = book * exposure; n_day = 0; yuan = 0.0
@@ -143,6 +152,16 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
             cap = gap_max_long if r["direction"] == "LONG" else gap_max
             if cap is not None and ag > cap:
                 continue
+            # The pin cost is not uniform across names: a stock that locks at the
+            # price limit often is a stock that will not let the clear order fill.
+            # The panel already carries each name's own historical lock rate, so the
+            # cost we just learned to price can be avoided where it is predictable.
+            if max_lock_rate is not None:
+                lr = float(r["lock_rate_up_250"] if r["direction"] == "SHORT"
+                           else r["lock_rate_dn_250"])
+                if np.isfinite(lr) and lr > max_lock_rate:
+                    n_lockskip += 1
+                    continue
             pr = float(r["entry"]); code = str(r["stock"])
             w = float(r["_weight"]) / (float(r["_rs"]) or 1.0) * rs
             if gap_scale != 1.0 and ag >= 0.07:
@@ -186,6 +205,21 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 gross -= entry_cost(r["direction"], r["adj_gap"], spread)
             else:
                 gross -= slip_cost(pred, slip_scale)
+            # A trade that ends pinned on a price limit cannot be cleared at 13:20,
+            # and the backtest has been settling it at the limit price - the price
+            # nobody traded. Measured on 893 price-limit-bound trades walked through
+            # the 1-minute bars (v19_overnight.py, 2023-06..2026-10): 32.3 pct were
+            # still pinned at 13:25, and carrying those to the next open cost -2.311
+            # pct of notional on average (SHORT -3.149, LONG +0.349, only 18.1 pct
+            # would have been better carried). pin_penalty is that number; 0 keeps
+            # the old behaviour. It is a return-side cost, not a fee: it is the
+            # difference between the price we assumed and the price we would get.
+            if pin_penalty:
+                cl_ = float(r["day_close"])
+                if ((r["direction"] == "SHORT" and cl_ >= float(r["lu"]) - 1e-9)
+                        or (r["direction"] == "LONG" and cl_ <= float(r["ld"]) + 1e-9)):
+                    gross -= pin_penalty
+                    n_pin += 1
             if np.isfinite(pred):
                 parts.append(pred)
             rem -= notional; yuan += notional * gross; n_day += 1; n_all += 1
@@ -209,7 +243,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     return dict(yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
                 per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,
-                withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades)
+                withdrawn=withdrawn, dir_n=dir_n, dir_y=dir_y, trades=trades,
+                n_pin=n_pin, n_lockskip=n_lockskip)
 
 def main():
     def show(label, cfg):
