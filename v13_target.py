@@ -275,6 +275,16 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 gross -= slip_cost(p_new, 1.0) - slip_cost(min(p_new, liq_ref), 1.0)
             if cost_mode == "measured":
                 gross -= entry_cost(r["direction"], r["adj_gap"], spread)
+            elif cost_mode == "auction":
+                # Arm A: the order was already in the opening auction, so the fill IS
+                # the exchange opening print - which is the price this row already
+                # carries in r["entry"]. There is no late-entry cost to pay, so this
+                # branch charges nothing. It is the UPPER BOUND on the auction path,
+                # not the auction path: it assumes the 08:59 decision was made on an
+                # indicative price that matched the open. The gap between the two is
+                # exactly what preopen_probe.py measures (nRef vs nOpen), and until
+                # that is answered this number is a ceiling, not a forecast.
+                pass
             else:
                 gross -= slip_cost(pred, slip_scale)
             # A trade that ends pinned on a price limit cannot be cleared at 13:20,
