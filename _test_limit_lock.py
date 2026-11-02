@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 r"""The limit-lock rule: which stops get armed, and what happens when one is not.
 
 Two rules for the case where the PRICE LIMIT, not the 4 pct, is what sets the
@@ -65,6 +65,9 @@ class FakeSK:
 def place(rule, entry, direction, use_sl=True):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
     t.config = G.Config()
+    # the probe order is what makes an order object exist to read back; the
+    # shipped default is off, so this suite asks for it explicitly
+    t.config.paper_send_probe_orders = True
     t.config.limit_lock_rule = rule
     t.config.use_stop_loss = use_sl
     lg = logging.getLogger("o" + str(abs(hash((rule, entry, str(direction))))))
@@ -139,6 +142,7 @@ check("use_stop_loss=False keeps the take profit and the 13:20 clear",
 def monitor(sl_price, price):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
     t.config = G.Config()
+    t.config.paper_send_probe_orders = True
     t.config.paper_poll_sec = 0.05
     t.config.force_exit_time = "23:55"
     lg = logging.getLogger("m" + str(id(t)))

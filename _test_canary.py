@@ -1,4 +1,4 @@
-"""Offline test of the canary: it must pick the cheapest LONG, send 現股買 at
+﻿"""Offline test of the canary: it must pick the cheapest LONG, send 現股買 at
 跌停, and query the smart report. No COM, no market."""
 import sys, warnings, logging, tempfile
 warnings.filterwarnings("ignore")
@@ -6,6 +6,8 @@ sys.path.insert(0, ".")
 import gap_fade_auto as G
 
 cfg = G.Config()
+# the canary is a probe order; this suite is about what it does when it IS on
+cfg.paper_send_probe_orders = True
 t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
 t.config = cfg
 lg = logging.getLogger("t"); lg.addHandler(logging.StreamHandler(sys.stdout))

@@ -695,6 +695,15 @@ class Config:
     # --- paper mode (see GapFadePaperTrader) ---
     paper_poll_sec = 10         # simulated-fill resolution; 22 names batch in 0.47s
     paper_probe_zhang = 1       # probe order size in ZHANG (nQty is zhang, not shares)
+    # Set False to place NOTHING at the broker. The probe and the canary are real
+    # orders: 1 張 each, priced where they should not fill, but a SHORT probe sits
+    # at 漲停 on a stock the strategy picked precisely because it gapped up, so it
+    # can fill (and on 2026-10-28 six rejected probes were still sitting at the
+    # broker at status 32 with a next-day 13:20 clearing time). With this False the
+    # simulated book is unchanged - it never depended on the probe being accepted -
+    # but the smart-order channel and the accept-rate gate cannot be measured,
+    # because there is no accepted order to read.
+    paper_send_probe_orders = False
     # If every probe order was rejected, nothing exists on the broker's side and
     # the smart-order status path stays untested. One 現股買 canary (1 張, priced
     # where it cannot fill) is what makes "accepted -> GetTSSmartStrategyReport"
@@ -4213,7 +4222,14 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         to answer and the whole status/fill channel stays unverified going into
         live. The canary is 1 張 現股買 at 跌停: it is accepted, it is visible in
         the Capital App, it cannot fill, and the 13:20 time-clear removes it.
+
+        Skipped entirely when paper_send_probe_orders is False - the canary is a
+        real 現股買, and a buy at 跌停 does fill if the stock goes limit-down.
         """
+        if not getattr(self.config, "paper_send_probe_orders", True):
+            self.log.info("  [CANARY] probe orders are OFF; nothing sent, so the "
+                          "accept-rate and smart-order gates stay NOT TESTED")
+            return
         cands = [s for s in self.signals if s.direction == Direction.LONG]
         if not cands:
             cands = list(self.signals)
@@ -4322,16 +4338,22 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         sig._slip_measured = False
 
         probe = self._probe_price(sig)
-        self.log.info(
-            f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "
-            f"@ {real_entry} SL={sig.sl_price} TP={sig.tp_price} "
-            f"-> sending {self.config.paper_probe_zhang} 張 @ {probe} (cannot fill)")
-        sig.entry_price = probe
-        sig.shares = self.config.paper_probe_zhang * 1000
-        super()._place_entry_order(sig)
-        # Restore the real ticket so _mark_exit prices the trade we WOULD have done.
-        sig.entry_price = real_entry
-        sig.shares = real_shares
+        if not getattr(self.config, "paper_send_probe_orders", True):
+            self.log.info(
+                f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "
+                f"@ {real_entry} SL={sig.sl_price} TP={sig.tp_price} "
+                f"-> probe orders are OFF, nothing sent to the broker")
+        else:
+            self.log.info(
+                f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "
+                f"@ {real_entry} SL={sig.sl_price} TP={sig.tp_price} "
+                f"-> sending {self.config.paper_probe_zhang} 張 @ {probe} (cannot fill)")
+            sig.entry_price = probe
+            sig.shares = self.config.paper_probe_zhang * 1000
+            super()._place_entry_order(sig)
+            # Restore the real ticket so _mark_exit prices the trade we WOULD have done.
+            sig.entry_price = real_entry
+            sig.shares = real_shares
 
         # Register the SIMULATED ticket no matter what the probe order did.
         # The probe is priced so it can never fill, and the broker can also
