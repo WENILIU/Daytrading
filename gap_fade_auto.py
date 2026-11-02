@@ -4343,6 +4343,13 @@ class GapFadePaperTrader(GapFadeAutoTrader):
                 f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "
                 f"@ {real_entry} SL={sig.sl_price} TP={sig.tp_price} "
                 f"-> probe orders are OFF, nothing sent to the broker")
+            # Nothing exists at the broker, so the simulated ticket IS the
+            # position. The parent sets FILLED on an accepted ack; skipping the
+            # send leaves the signal PENDING, and monitor_positions() filters on
+            # FILLED/MONITORING - measured 2026-11-02 09:10, where 7 booked
+            # tickets produced "All paper positions resolved." at the open and a
+            # zero-trade report in 27 seconds.
+            sig.state = PositionState.FILLED
         else:
             self.log.info(
                 f"  [PAPER] {sig.symbol} intended ticket: {real_shares:,} shares "

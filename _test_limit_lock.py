@@ -62,12 +62,13 @@ class FakeSK:
         return types.SimpleNamespace()
 
 
-def place(rule, entry, direction, use_sl=True):
+def place(rule, entry, direction, use_sl=True, send_probe=True):
     t = G.GapFadePaperTrader.__new__(G.GapFadePaperTrader)
     t.config = G.Config()
     # the probe order is what makes an order object exist to read back; the
-    # shipped default is off, so this suite asks for it explicitly
-    t.config.paper_send_probe_orders = True
+    # shipped default is off, so this suite asks for it explicitly unless a
+    # case below is specifically about the off path
+    t.config.paper_send_probe_orders = send_probe
     t.config.limit_lock_rule = rule
     t.config.use_stop_loss = use_sl
     lg = logging.getLogger("o" + str(abs(hash((rule, entry, str(direction))))))
@@ -136,6 +137,20 @@ check("use_stop_loss=False unarms an ordinary 4% stop too",
       o.nStopLossFlag == 0 and o.bstrSLTrigger == "0", (o.nStopLossFlag, o.bstrSLTrigger))
 check("use_stop_loss=False keeps the take profit and the 13:20 clear",
       o.nTakeProfitFlag == 1 and o.nClearAllFlag == 1 and o.bstrClearCancelTime == "1320")
+
+
+# ---------- 2b. probe orders OFF: the simulated ticket IS the position ----------
+# Nothing is sent on this path, so the parent never sets FILLED on an accepted
+# ack. monitor_positions() filters on FILLED/MONITORING - measured 2026-11-02
+# 09:10, where 7 booked tickets produced "All paper positions resolved." at the
+# open and a zero-trade report 27 seconds into the session.
+o, sig, t = place("stop", 510.0, G.Direction.SHORT, send_probe=False)
+check("probe orders OFF sends nothing to the broker", o is None, o)
+check("probe orders OFF still opens the simulated position",
+      sig.state == G.PositionState.FILLED and "2345" in t.active_positions,
+      (sig.state, list(t.active_positions)))
+check("probe orders OFF leaves the acceptance gate with no sample",
+      not t.exec_stats.get("orders"), t.exec_stats.get("orders"))
 
 
 # ---------- 3. an unarmed stop must not read as "already stopped" ----------
