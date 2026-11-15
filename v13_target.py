@@ -1,4 +1,4 @@
-﻿"""Search for a configuration that still clears CAGR 100 pct / MDD -5 pct once the
+"""Search for a configuration that still clears CAGR 100 pct / MDD -5 pct once the
 entry has to be paid for.
 
 Frame, and why this frame: the book is pinned at 4_500_000 and every profit is
@@ -54,6 +54,21 @@ cj = D["stock"].map(fp).fillna(-1).astype(int).values
 gj = D["stock"].map(gp).fillna(-1).astype(int).values
 D["blocked"] = ((cj >= 0) & fcd[ri, np.clip(cj, 0, fcd.shape[1] - 1)]) | \
                ((gj >= 0) & (dtv[ri, np.clip(gj, 0, dtv.shape[1] - 1)] == 0))
+# --- S3 exhaustion feature: by the close of the 09:00 bar (09:01), has price already
+# fallen >0.5% from the open? Only 2023-05+ has 1-min data; rows without coverage fail.
+# This is a pre-trade gate applied inside run() only when s3=True, so the published
+# (date_min=None, s3=False) books are unchanged.
+try:
+    _s3 = pd.read_pickle("v20_features_cache.pkl")[["date", "stock_str", "price_dir"]].copy()
+    _s3["_dk"] = pd.to_datetime(_s3["date"]).dt.strftime("%Y-%m-%d")
+    _s3 = _s3.drop_duplicates(subset=["_dk", "stock_str"])
+    D["_dk"] = pd.to_datetime(D["date"]).dt.strftime("%Y-%m-%d")
+    D = D.merge(_s3[["_dk", "stock_str", "price_dir"]].rename(columns={"stock_str": "stock"}),
+                on=["_dk", "stock"], how="left")
+    D["s3_pass"] = (D["price_dir"] < -0.005).fillna(False)
+    D = D.drop(columns=["_dk"])
+except FileNotFoundError:
+    D["s3_pass"] = False
 GROUPS = {d: g[~g["blocked"]] for d, g in D.groupby("date")}
 
 # Entry cost measured on 2026-11-01 by re-walking the whole exit path from a 09:01
@@ -114,7 +129,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         cost_mode="measured", spread=SPREAD, gap_max_long=None,
         part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
         pin_penalty=None, max_lock_rate=None, dir_cap=None,
-        pin_short=None, pin_long=None, zt_min_dist=None, size_scale=1.0):
+        pin_short=None, pin_long=None, zt_min_dist=None, size_scale=1.0,
+        date_min=None, s3=False):
     # Pin cost resolution. Defaults are the measured per-side values (see
     # PIN_SHORT_MEASURED above). pin_penalty is the legacy single-number override and
     # still means what it always did: pin_penalty=0 turns the charge off, which is how
@@ -148,6 +164,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     b1, b2 = (brake if brake is not None else (0.0, 0.0))
     book = float(CAP0); peak = float(CAP0); withdrawn = 0.0
     yearly = {}; worst_dd = 0.0; n_all = 0; brake_days = 0; expo = []; parts = []
+    daily = []  # (date, yuan, book, dd) - the per-day path, for combining books
     n_pin = 0  # trades charged a pin cost; see pin_short / pin_long
     n_pin_dir = {"SHORT": 0, "LONG": 0}  # pinned population by side, charged or not
     n_lockskip = 0  # signals skipped by max_lock_rate; see the lock filter
@@ -169,7 +186,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
     expo_book = []
     dir_n = {"SHORT": 0, "LONG": 0}
     dir_y = {"SHORT": 0.0, "LONG": 0.0}
-    for d in days:
+    sdays = [d for d in days if (date_min is None or pd.Timestamp(d) >= pd.Timestamp(date_min))]
+    for d in sdays:
         cdd = (book - peak) / peak
         rs = 1.0
         if b1:
@@ -193,7 +211,8 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         # fraction of the line; None leaves the old behaviour of one shared budget.
         rem_dir = {"SHORT": rem if dir_cap is None else book * dir_cap,
                    "LONG": rem if dir_cap is None else book * dir_cap}
-        for _, r in GROUPS[d].sort_values("_rank").iterrows():
+        g = GROUPS[d] if not s3 else GROUPS[d][GROUPS[d]["s3_pass"]]
+        for _, r in g.sort_values("_rank").iterrows():
             if n_day >= order_cap:
                 break
             ag = abs(float(r["adj_gap"]))
@@ -327,11 +346,12 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         peak = max(peak, book)
         dd = (book - peak) / peak
         worst_dd = min(worst_dd, dd)
+        daily.append((str(pd.Timestamp(d).date()), float(yuan), float(book), float(dd)))
         yearly[int(pd.Timestamp(d).year)] = yearly.get(int(pd.Timestamp(d).year), 0.0) + yuan
         expo.append((book * exposure - rem) / (book * exposure))
         expo_book.append((book * exposure - rem) / book)
-    return dict(yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
-                per_day=n_all / len(days), n_days=len(days), brake_pct=brake_days / len(days) * 100,
+    return dict(daily=daily, yearly=yearly, monthly=monthly, mdd=worst_dd * 100, n=n_all,
+                per_day=n_all / len(sdays), n_days=len(sdays), brake_pct=brake_days / len(sdays) * 100,
                 expo=float(np.mean(expo)) * 100, expo_max=float(np.max(expo_book)) * 100,
                 expo_pct={q: float(np.percentile(expo_book, q)) * 100
                           for q in (50, 75, 90, 95, 99)} if expo_book else {}, part90=float(np.percentile(parts, 90)) * 100 if parts else 0.0,

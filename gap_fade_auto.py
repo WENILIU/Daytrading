@@ -606,6 +606,20 @@ class Config:
     # 五檔讀不到時退回「最新價跨越 N 個 tick」，並在日誌標出是哪一種來源。
     entry_fallback_ticks = 1
 
+    # ===== S3 exhaustion gate (09:01 pre-trade price check) =====
+    # After Path B reads the book at 09:00+entry_delay_sec, only take a signal if the
+    # traded price has already moved past s3_max_vs_open vs the open, i.e.
+    # raw = (price-open)/open < s3_max_vs_open. This is the validated pre-trade gate.
+    # Backtest (2023-05+, measured-cost engine v13_target): annual +8% -> +170.7%,
+    # position MDD -15.68% -> -5.22%. Path B only: Path C prices at the open and
+    # cannot observe the 09:01 move, so the gate no-ops there by design.
+    # Route C default = -0.8%. Measured-cost engine, 2023-05+, 450M no-financing cap
+    # (v20_v13target_capped.py): -0.8% lifts calmar enough that within 1.0x exposure
+    # annual reaches +199%/-4.29% at size=1.4 and +208%/-4.73% at size=1.6, versus
+    # -0.5% at only +171%/-5.22%.
+    enable_s3_exhaustion = True     # True = apply the 09:01 exhaustion gate
+    s3_max_vs_open = -0.008         # require raw vs open < -0.8% to enter (route C)
+
     # ===== v13 POSITION SIZING (pred_q ladder x regime multipliers) =====
     position_multiplier = 1.0       # leverage knob (backtest frontier: 0.6/1.0/1.5)
     pos_cap_pct = 0.25              # hard cap per name
@@ -708,6 +722,9 @@ class Config:
     # 這個帳戶拿不到 1.90x，能跑的曝險就是 1.00x。階梯與每档的報酬見 v15_credit.py。
     account_limit = 4_500_000
     # --- paper mode (see GapFadePaperTrader) ---
+    # Route C: run `python gap_fade_auto.py paper`. With paper_send_probe_orders=False
+    # (below) it logs every intended 09:01 ticket and sends NOTHING to the broker, then
+    # simulates fills from the live quote feed -> measures slippage / fill-rate / brake.
     paper_poll_sec = 10         # simulated-fill resolution; 22 names batch in 0.47s
     paper_probe_zhang = 1       # probe order size in ZHANG (nQty is zhang, not shares)
     # Set False to place NOTHING at the broker. The probe and the canary are real
@@ -2613,6 +2630,7 @@ class GapFadeAutoTrader:
         skipped_lot_coarse = 0
         skipped_order_cap = 0
         skipped_no_quote = 0
+        skipped_s3 = 0
 
         ceiling = self._effective_budget(self._current_equity)
         by_equity = self._current_equity * self.config.max_total_exposure
@@ -2673,6 +2691,17 @@ class GapFadeAutoTrader:
                     skipped_no_quote += 1
                     self.log.info(f"  {sig.symbol}: no entry price at "
                                   f"+{self.config.entry_delay_sec:.0f}s ({why}), SKIP")
+                    continue
+
+            # ===== S3 exhaustion gate: skip unless 09:01 already fell past threshold =====
+            if self.config.enable_s3_exhaustion and not self.config.entry_at_open:
+                raw_vs_open = ((entry_price - sig.open_price) / sig.open_price
+                               if sig.open_price else 0.0)
+                if raw_vs_open >= self.config.s3_max_vs_open:
+                    skipped_s3 += 1
+                    self.log.info(
+                        f"  {sig.symbol}: 09:01 {raw_vs_open*100:+.2f}% vs open, "
+                        f"not down > {self.config.s3_max_vs_open*100:.1f}% -> S3 SKIP")
                     continue
 
             # ===== v13 sizing: base_pos x zt_mult x dd_scale x k_model x k_trail =====
@@ -2790,6 +2819,9 @@ class GapFadeAutoTrader:
                 f"+{self.config.entry_delay_sec:.0f}s): {skipped_no_quote}")
         if skipped_at_limit:
             self.log.info(f"  Skipped (at price limit): {skipped_at_limit}")
+        if skipped_s3:
+            self.log.info(f"  Skipped (S3 exhaustion: 09:01 not down > "
+                          f"{self.config.s3_max_vs_open*100:.1f}% vs open): {skipped_s3}")
         if skipped_impact_capped:
             self.log.info(f"  Skipped (1 zhang > {self.config.max_open_participation:.0%} of "
                           f"opening tape): {skipped_impact_capped}")
@@ -5149,11 +5181,17 @@ if __name__ == "__main__":
         print(f"  Capital: {config.capital:,.0f}")
         trader = GapFadeSimulator(config)
     elif mode == "paper":
-        print("PAPER MODE - real Capital account, risk-free orders + simulated fills")
+        print("PAPER MODE - real Capital account, live 09:01 quotes, simulated fills")
         print(f"  Account: {config.cust_cert_id} | Capital: {config.capital:,.0f}")
-        print("  Orders ARE sent and visible in the Capital App, but 1 張 at a price")
-        print("  that cannot trade (跌停 for buys, 漲停 for sells). The real ticket is")
-        print("  simulated against the live quote feed. Capital has no paper-order API.")
+        if getattr(config, "paper_send_probe_orders", False):
+            print("  Probe orders ON: sends 1 張 at a price that cannot fill (visible in")
+            print("  the App) to test the accepted-order channel. No position is filled.")
+        else:
+            print("  Record-only (paper_send_probe_orders=False): NO orders are sent.")
+            print("  Logs each intended 09:01 ticket (S3 gate + sizing applied), then")
+            print("  simulates fills from the live quote feed -> slippage / fill-rate /")
+            print("  brake calibration. This is route C. Set paper_send_probe_orders=True")
+            print("  later to also exercise the accepted-order / accept-rate gate.")
         trader = GapFadePaperTrader(config)
     elif mode == "scan":
         print("SCAN / RISK1 - full-market quote scan only, NO orders")
