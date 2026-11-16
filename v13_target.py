@@ -69,6 +69,19 @@ try:
     D = D.drop(columns=["_dk"])
 except FileNotFoundError:
     D["s3_pass"] = False
+# --- GMC (隔日沖 fade) feature: a stock whose 主力分點 (最大買超分點) net-bought hard
+# AND rose on the PREVIOUS trading day (T-1). Entering such a name SHORT when it opens
+# up on T is the "隔日沖 fade" leg. Flag merged by (date, stock); only 2023-05+ seats.
+try:
+    _gmc = pd.read_pickle("gmc_signals.pkl").copy()
+    _gmc["_gk"] = pd.to_datetime(_gmc["date"]).dt.strftime("%Y-%m-%d")
+    _gmc = _gmc.drop_duplicates(subset=["_gk", "stock"])
+    D["_gk"] = pd.to_datetime(D["date"]).dt.strftime("%Y-%m-%d")
+    D = D.merge(_gmc[["_gk", "stock"]].assign(gmc_pass=True), on=["_gk", "stock"], how="left")
+    D["gmc_pass"] = D["gmc_pass"].fillna(False)
+    D = D.drop(columns=["_gk"])
+except FileNotFoundError:
+    D["gmc_pass"] = False
 GROUPS = {d: g[~g["blocked"]] for d, g in D.groupby("date")}
 
 # Entry cost measured on 2026-11-01 by re-walking the whole exit path from a 09:01
@@ -130,7 +143,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         part_delta=False, liq_ref=0.10, cap_pct=None, capture=False,
         pin_penalty=None, max_lock_rate=None, dir_cap=None,
         pin_short=None, pin_long=None, zt_min_dist=None, size_scale=1.0,
-        date_min=None, s3=False):
+        date_min=None, s3=False, gmc=False):
     # Pin cost resolution. Defaults are the measured per-side values (see
     # PIN_SHORT_MEASURED above). pin_penalty is the legacy single-number override and
     # still means what it always did: pin_penalty=0 turns the charge off, which is how
@@ -211,7 +224,11 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
         # fraction of the line; None leaves the old behaviour of one shared budget.
         rem_dir = {"SHORT": rem if dir_cap is None else book * dir_cap,
                    "LONG": rem if dir_cap is None else book * dir_cap}
-        g = GROUPS[d] if not s3 else GROUPS[d][GROUPS[d]["s3_pass"]]
+        g = GROUPS[d]
+        if s3:
+            g = g[g["s3_pass"]]
+        if gmc:
+            g = g[g["gmc_pass"] & (g["direction"] == "SHORT")]
         for _, r in g.sort_values("_rank").iterrows():
             if n_day >= order_cap:
                 break
