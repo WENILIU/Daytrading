@@ -44,7 +44,11 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--start", default="2023-05-23")
 ap.add_argument("--end", default="2026-12-31")
 ap.add_argument("--no-replay", action="store_true", help="不讀 1m，只用引擎(已內含真實 09:01 成本)")
-a = ap.parse_args(); S, E = a.start, a.end; tag = "%s_%s" % (S, E)
+ap.add_argument("--outdir", default=None, help="CSV 輸出目錄，預設目前工作目錄")
+ap.add_argument("--size", type=float, default=5.5, help="size_scale，預設 5.5；MDD-safe(真實成本)=2.6")
+a = ap.parse_args(); S, E = a.start, a.end; SS = a.size; tag = "%s_%s_size%s" % (S, E, ("%g" % a.size))
+OUT = a.outdir or os.getcwd()
+os.makedirs(OUT, exist_ok=True)
 
 from v13_engine import exit_of_legal, CAP0, COST
 from v13_executable import FC_COST, SL_COST
@@ -108,7 +112,7 @@ for (dd, code, side, notional, gross, reason, pr, ex) in r["trades"]:
     td.append(row)
     e = daily.setdefault(dd, [0.0, 0, 0]); e[0] += notional * gross; e[1] += 1; e[2] += 1 if gross > 0 else 0
 tdf = pd.DataFrame(td).sort_values(["日期", "模型排名"])
-pp = r"%s\v21_trades_%s.csv" % (os.getcwd(), tag); tdf.to_csv(pp, index=False, encoding="utf-8-sig")
+pp = r"%s\v21_trades_%s.csv" % (OUT, tag); tdf.to_csv(pp, index=False, encoding="utf-8-sig")
 print("WROTE", pp, len(tdf), "筆")
 
 cov_by_day = {pd.Timestamp(d): (g["price_dir"].notna().mean() * 100 if len(g) else 0.0) for d, g in mon.groupby("date")}
@@ -120,7 +124,7 @@ for d in sorted(cov_by_day):
         可評估=("Y" if cov_by_day[d] >= COVER_MIN else "N"), 成交筆=nf, 勝=w, 敗=nf - w, 淨額元=round(net),
         淨pct對450萬=round(net / CAP0 * 100, 3), 累計淨額元=round(cum),
         備註=("OK" if cov_by_day[d] >= COVER_MIN else "缺1m資料")))
-ddf = pd.DataFrame(rows); pq = r"%s\v21_daily_%s.csv" % (os.getcwd(), tag); ddf.to_csv(pq, index=False, encoding="utf-8-sig")
+ddf = pd.DataFrame(rows); pq = r"%s\v21_daily_%s.csv" % (OUT, tag); ddf.to_csv(pq, index=False, encoding="utf-8-sig")
 print("WROTE", pq, len(ddf), "列")
 
 yrs = sorted(r["yearly"]); rets = [r["yearly"][k] / CAP0 * 100 for k in yrs]
@@ -132,7 +136,7 @@ for y in yrs:
     yrows.append(dict(年=y, 報酬pct=round(rets[yrs.index(y)], 1), 年內最大回撤pct=round(sub["dd"].min() * 100, 2),
                       成交=sum(1 for k in daily if k.startswith(str(y)) and daily[k][1] > 0),
                       獲利日=sum(1 for k in daily if k.startswith(str(y)) and daily[k][0] > 0)))
-ydf = pd.DataFrame(yrows); py = r"%s\v21_yearly_%s.csv" % (os.getcwd(), tag); ydf.to_csv(py, index=False, encoding="utf-8-sig")
+ydf = pd.DataFrame(yrows); py = r"%s\v21_yearly_%s.csv" % (OUT, tag); ydf.to_csv(py, index=False, encoding="utf-8-sig")
 print("WROTE", py)
 
 print("\n=== 全期驗證（引擎=真實 09:01 成本口徑, entry_cost 已內含 S3_REAL_ENTRY）===")

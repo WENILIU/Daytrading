@@ -16,8 +16,8 @@ import v13_target as T
 #   zt_min_dist=0.014: 進場價距漲跌幅限制 <1.4% 的不做（避開 -3.1% pin 尾部）
 #   size_scale=5.5   : 在 MDD budget 內重新放大部位
 # ============================================================
-DMIN="2023-05-23"
-CFG=dict(th=-0.012, qmin=0.20, ss=2.6, gap_max=0.08, zt_min_dist=0.014)
+DMIN="2023-05-23"  # improved: deeper S3 th=-0.02 + wider gap_max=0.12 (real 09:01 cost)
+CFG=dict(th=-0.020, qmin=0.20, ss=12.0, gap_max=0.12, zt_min_dist=0.014)
 BASE = T.D[(pd.to_datetime(T.D["date"])>=pd.Timestamp(DMIN)) & (~T.D["blocked"].values)]
 Dw = BASE[(BASE["pred_q"]>=CFG["qmin"]) & (BASE["price_dir"]<CFG["th"])]
 T.GROUPS={d:g for d,g in Dw.groupby("date")}; T.days=sorted(Dw["date"].unique())
