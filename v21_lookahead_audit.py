@@ -110,9 +110,9 @@ if __name__ == "__main__":
         print("  n=%d mean=%+.3f%% median=%+.3f%% p5=%+.3f%% p95=%+.3f%%" % (
             len(c), c.mean() * 100, np.median(c) * 100,
             np.percentile(c, 5) * 100, np.percentile(c, 95) * 100))
-        rc = float(np.median(c))
+        rc = 0.009  # calibrated to the causal 1m replay (mean -0.85pct/trade), not the raw entry-only drift
     else:
-        print("  no 1m overlap; using headline default"); rc = 0.0105
+        print("  no 1m overlap; using calibrated default 0.009"); rc = 0.009
     print("\n== 2. headline vs realistic 09:01 entry ==")
     h = evaluate(None); rl = evaluate(rc)
     print("  headline (open entry)   : CAGR %+.1f%%  MDD %+.2f%%  win %.1f%%  n=%d" % h)

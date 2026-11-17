@@ -17,7 +17,7 @@ import v13_target as T
 #   size_scale=5.5   : 在 MDD budget 內重新放大部位
 # ============================================================
 DMIN="2023-05-23"
-CFG=dict(th=-0.012, qmin=0.20, ss=5.5, gap_max=0.08, zt_min_dist=0.014)
+CFG=dict(th=-0.012, qmin=0.20, ss=2.6, gap_max=0.08, zt_min_dist=0.014)
 BASE = T.D[(pd.to_datetime(T.D["date"])>=pd.Timestamp(DMIN)) & (~T.D["blocked"].values)]
 Dw = BASE[(BASE["pred_q"]>=CFG["qmin"]) & (BASE["price_dir"]<CFG["th"])]
 T.GROUPS={d:g for d,g in Dw.groupby("date")}; T.days=sorted(Dw["date"].unique())

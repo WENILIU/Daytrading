@@ -129,10 +129,29 @@ PIN_SHORT_MEASURED = 0.03149
 PIN_LONG_MEASURED = 0.0
 
 
-def entry_cost(direction, gap, spread=SPREAD):
+# S3 real-entry slippage. A SHORT gated by price_dir has already fallen by 09:01,
+# but the backtest books it at the open. Measured on 1m bars 2025-02..10 two ways
+# (v21_lookahead_audit.py): the raw open->09:01 price drift is ~1.05 pct, but TP/SL
+# are %-relative to entry, so a full 1m replay that re-derives exits from the real
+# 09:01 fill (post-entry bars only, no pre-entry look-ahead) gives the honest
+# per-trade cost of the real fill: mean -0.85 pct, median -0.90 (n=567). The
+# gap-bucket ENTRY_COST table is NOT conditioned on price_dir, so it under-charges
+# exactly these trades. ON by default: the headline is the realistic 09:01 entry.
+# Pass price_dir=None (arm A / auction) or S3_REAL_ENTRY=False for open-entry.
+S3_REAL_TH = -0.005           # price_dir at/below which a short has "already fallen"
+S3_REAL_SHORT_ENTRY = 0.009   # extra cost vs open entry, causal 1m replay n=567: mean -0.85pct/trade
+S3_REAL_ENTRY = True          # master switch; False reproduces the pre-audit open-entry numbers
+
+def entry_cost(direction, gap, spread=SPREAD, price_dir=None):
     g = abs(float(gap))
     edge = 0.10 if g >= 0.10 else (0.07 if g >= 0.07 else (0.05 if g >= 0.05 else 0.00))
-    return ENTRY_COST[(direction, edge)] + spread
+    base = ENTRY_COST[(direction, edge)] + spread
+    if (S3_REAL_ENTRY and direction == "SHORT" and price_dir is not None
+            and np.isfinite(price_dir) and price_dir < S3_REAL_TH):
+        # Price the gated short at its real 09:01 fill, but never below what the
+        # gap bucket already charges (a 10 pct gap is genuinely more expensive).
+        return max(base, S3_REAL_SHORT_ENTRY)
+    return base
 
 print("signals %d, blocked by executability %d" % (len(D), int(D["blocked"].sum())), flush=True)
 
@@ -310,7 +329,7 @@ def run(liq=0.25, slip_scale=1.0, gap_max=None, gap_scale=1.0, exposure=1.0,
                 p_new = notional / (K_OPEN * dv1)
                 gross -= slip_cost(p_new, 1.0) - slip_cost(min(p_new, liq_ref), 1.0)
             if cost_mode == "measured":
-                gross -= entry_cost(r["direction"], r["adj_gap"], spread)
+                gross -= entry_cost(r["direction"], r["adj_gap"], spread, price_dir=r["price_dir"])
             elif cost_mode == "auction":
                 # Arm A: the order was already in the opening auction, so the fill IS
                 # the exchange opening print - which is the price this row already
