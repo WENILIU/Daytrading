@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""One command for the 08:55 pre-open chain.
+"""One command for the 08:45 pre-open chain.
 
 The schedule carried this chain as a ten-step prompt. Describing it was not enough: on
 2026-10-29 and 2026-10-30 the schedule fired on time and nothing on disk moved - no
@@ -27,7 +27,7 @@ PY = sys.executable
 ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
 MARK_PAPER = "LIVE FEASIBILITY REPORT"
 MARK_RISK1 = "RISK1 exchange opening-print time"
-PAPER_FIRST, PAPER_LAST = "08:55", "13:25"
+PAPER_FIRST, PAPER_LAST = "08:45", "13:25"
 
 
 def sh(args, timeout):

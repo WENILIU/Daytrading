@@ -376,6 +376,32 @@ def main():
         print("       %-6s store_prev=%s [store %s]   fugle session=%s"
               % (s, prev_close.get(s), baseline_date, fugle_date.get(s)))
 
+    # A baseline taken before the open is always one session short: the store is
+    # refreshed by the morning chain, so at 08:44 it still ends on the session before
+    # yesterday. Measured 2026-11-17: the store ended 2026-11-13 while the real T-1
+    # was 2026-11-16, so every ref_vs_prev_pct in the file was off by one session -
+    # 0050 printed -5.90% when the truth is 0.000%, because a pre-open nRef is just
+    # yesterday's close. The old mid-run check cannot catch this: it compares Fugle
+    # to itself across the run, and Fugle is already on today's session when we start.
+    today_iso = datetime.date.today().isoformat()
+    if any(v == today_iso for v in fugle_date.values()):
+        short = baseline_date
+        changed = 0
+        for s in SYMS:
+            try:
+                pc = float(client.intraday.quote(symbol=s).get("previousClose") or 0)
+            except Exception:
+                continue
+            if pc > 0 and float(prev_close.get(s) or 0) != pc:
+                prev_close[s] = pc
+                changed += 1
+        if changed:
+            baseline_date = "fugle previousClose (store ended %s)" % short
+            print("     REBASED %d/%d baselines onto Fugle's previousClose: Fugle is"
+                  " on session %s while the store ends %s, so"
+                  % (changed, len(SYMS), today_iso, short))
+            print("     the store cannot be the T-1 reference at this hour.")
+
     want = set(SYMS)
     base, scanned = walk(trader, want)
     print("    first pass: %d rows scanned, %d/%d wanted found"
@@ -507,8 +533,32 @@ def main():
 
     # after the open: the actual print, for the error distribution
     final, _ = walk(trader, want)
-    if not final and subres and subres.get("code") == 0:
-        final = read_by_no(trader, want)
+    if not final or not any(r.get("open") for r in final.values()):
+        # The monitor's own index can still be empty after the open. Measured
+        # 2026-11-16 and 2026-11-17: the walk returned nothing at ~09:01, so nOpen
+        # never landed and section [B] printed "no data" for every symbol - the one
+        # number that sizes the limit buffer. The old fallback only ran when an
+        # earlier subscribe() had succeeded, and that branch is skipped on any day the
+        # pre-open walk found even one symbol, so it never fired. Ask for the codes by
+        # number instead: GetStockByNoLONG answers for a subscribed symbol even when
+        # GetStockByIndexLONG enumerates nothing.
+        print("[6] the index walk has no opening price. Requesting the codes"
+              " directly ...")
+        if not subres or subres.get("code") != 0:
+            subres = subscribe(trader, SYMS)
+            for page, code in subres.get("tries", []):
+                print("    RequestStocks(page=%s) -> %s %s"
+                      % (page, code, code_msg(trader, code)))
+        for _ in range(6):
+            pump_messages(1.0)
+            got = read_by_no(trader, want)
+            if got:
+                final = got
+            if any(r.get("open") for r in got.values()):
+                break
+        print("    direct read: %d/%d readable, %d of them carry an opening price"
+              % (len(final), len(want),
+                 len([1 for r in final.values() if r.get("open")])))
     if scale is None:
         scale = detect_scale(final, prev_close)
     if scale is None:
