@@ -1158,6 +1158,19 @@ def parse_smart_strategy_report(row: str) -> dict:
         out["problems"] = ["report terminator, not an order"]
         return out
     t = (row or "").split(",")
+    # "M003,無資料" is what the broker answers when the report has no
+    # rows at all. Observed once per poll on 2026-11-16, 2026-11-17 and 2026-11-18,
+    # on sessions where paper sent nothing. It is a reply about the whole report, not
+    # a malformed order row, and counting it made the daily report carry a fake
+    # technical blocker ("50 smart-order rows could not be decoded" = 25 polls x the
+    # same reply). Any OTHER M0xx answer still surfaces, because that would be a
+    # return code we have not seen and should look at.
+    head = t[0].strip()
+    if (len(t) == 2 and len(head) == 4 and head[0] == "M"
+            and head[1:].isdigit() and "無資料" in t[1]):
+        out["ignorable"] = True
+        out["problems"] = ["broker answered: no rows for this query"]
+        return out
     if len(t) < 23:
         out["problems"].append(f"{len(t)} fields, expected >= 23")
         return out
