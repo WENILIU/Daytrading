@@ -45,8 +45,9 @@ ap.add_argument("--start", default="2023-05-23")
 ap.add_argument("--end", default="2026-12-31")
 ap.add_argument("--no-replay", action="store_true", help="不讀 1m，只用引擎(已內含真實 09:01 成本)")
 ap.add_argument("--outdir", default=None, help="CSV 輸出目錄，預設目前工作目錄")
-ap.add_argument("--size", type=float, default=5.5, help="size_scale，預設 5.5；MDD-safe(真實成本)=2.6")
-a = ap.parse_args(); S, E = a.start, a.end; SS = a.size; tag = "%s_%s_size%s" % (S, E, ("%g" % a.size))
+ap.add_argument("--size", type=float, default=2.6, help="size_scale；保守 MDD-safe=2.6(預設)")
+ap.add_argument("--aggressive", action="store_true", help="舊口徑：用 T-1 proxy 流動性上限(會高估小盤可成交性)。預設=保守版(真實 09:01 量能上限)。")
+a = ap.parse_args(); S, E = a.start, a.end; SS = a.size; tag = "%s_%s_size%s%s" % (S, E, ("%g" % a.size), ("_aggr" if a.aggressive else "_cons"))
 OUT = a.outdir or os.getcwd()
 os.makedirs(OUT, exist_ok=True)
 
@@ -61,8 +62,17 @@ if mon.empty:
 # 引擎 entry_cost 已預設內含真實 09:01 滑價(S3_REAL_ENTRY)，故此 aggregate 為真實口徑
 BASEF = mon[(~mon["blocked"].values) & (mon["pred_q"].fillna(-1) >= QMIN) & (mon["price_dir"] < TH)]
 T.GROUPS = {d: g for d, g in BASEF.groupby("date")}; T.days = sorted(BASEF["date"].unique())
+# 保守版預設：單檔 ≤ 真實 09:01 成交額的 T.REAL_OPEN_CAP；--aggressive 走舊 T-1 proxy 上限。
+liq_run = LIQ
+if not a.aggressive:
+    _pairs = [(str(s).zfill(4), str(pd.Timestamp(d).date())) for d, s in zip(BASEF["date"], BASEF["stock"])]
+    T.TO1 = T.build_open_volume_matrix(_pairs); T.K_OPEN = 1.0
+    liq_run = T.REAL_OPEN_CAP
+    print("模式: 保守版(真實 09:01 量能 cap %.0f%%)。要舊口徑加 --aggressive" % (T.REAL_OPEN_CAP * 100))
+else:
+    print("模式: aggressive(舊 T-1 proxy 流動性上限)")
 r = T.run(slip_scale=SLIP, date_min=S, s3=False, size_scale=SS, exposure=EXPO,
-          gap_max=GAPMAX, zt_min_dist=ZTMIN, liq=LIQ, brake=BRAKE, capture=True)
+          gap_max=GAPMAX, zt_min_dist=ZTMIN, liq=liq_run, brake=BRAKE, capture=True)
 
 ctx = {}
 for _, rr in BASEF.iterrows():

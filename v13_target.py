@@ -458,3 +458,56 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---- 保守版：真實開盤量能上限 (2026-11-19) ---------------------------------------------
+# 單檔部位以「真實 09:01(第二分鐘)成交額」的 REAL_OPEN_CAP 為上限，取代舊的 T-1 proxy
+# (K_OPEN×liq)。要舊口徑用 --aggressive / AGGRESSIVE_LIQ。理由見 RESEARCH_conservative.md。
+REAL_OPEN_CAP = 0.10        # 保守預設：單檔 ≤ 真實 09:01 成交額的 10%
+AGGRESSIVE_LIQ = 0.25       # 舊口徑：T-1 代理(高估小盤可成交性)
+_ONE_DIR = r"D:\Codex\2026-11-14\new-chat-2\outputs\capital_stock_data\data\fugle_1m"
+
+def build_open_volume_matrix(pairs, cache=r"fill_probe\_fv_cache.pkl"):
+    """回傳可餵給 run() 作為 dv1 來源(真實 09:01 分鐘成交額 TWD)的 DataFrame(索引=date, 欄=code)。
+    pairs: 可迭代的 (code, date)。用真實 1m 的 09:01 分鐘 Σ(close×股數)。以 pairs 集合為 key 快取。
+    用法(保守): T.TO1=build_open_volume_matrix(pairs); T.K_OPEN=1.0; run(..., liq=REAL_OPEN_CAP)。"""
+    import os, pickle, hashlib
+    need = {}
+    for c, d in pairs:
+        need.setdefault(str(c).zfill(4), set()).add(str(pd.Timestamp(d).date()))
+    key = hashlib.md5("#".join("%s:%s" % (c, ",".join(sorted(v))) for c, v in sorted(need.items())).encode()).hexdigest()
+    if cache and os.path.exists(cache):
+        try:
+            b = pickle.load(open(cache, "rb"))
+            if b.get("k") == key:
+                return b["FV"]
+        except Exception:
+            pass
+    files = {f[:-8]: os.path.join(_ONE_DIR, f) for f in os.listdir(_ONE_DIR)} if os.path.isdir(_ONE_DIR) else {}
+    fv = {}
+    for c, dset in need.items():
+        p = files.get(c)
+        if not p:
+            continue
+        try:
+            m = pd.read_parquet(p, columns=["time", "close", "volume"])
+        except Exception:
+            continue
+        t = pd.to_datetime(m["time"]); mm = (t.dt.hour * 60 + t.dt.minute).values; dd = t.dt.normalize()
+        vol = m["volume"].values * 1000.0 * m["close"].values
+        for ds in dset:
+            sel = ((dd == pd.Timestamp(ds)).values) & (mm == 541)
+            if sel.any():
+                fv[(c, ds)] = float(vol[sel].sum())
+    codes = sorted({k[0] for k in fv}); dts = sorted({pd.Timestamp(k[1]) for k in fv})
+    FV = pd.DataFrame(0.0, index=dts, columns=codes)
+    for (c, d), v in fv.items():
+        if c in FV.columns:
+            FV.at[pd.Timestamp(d), c] = v
+    if cache:
+        try:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            pickle.dump({"k": key, "FV": FV}, open(cache, "wb"))
+        except Exception:
+            pass
+    return FV

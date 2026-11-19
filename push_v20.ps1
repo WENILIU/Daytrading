@@ -47,6 +47,13 @@ $files = @(
   "v21_best.py",
   "v21_report.py",
   "v21_audit.py",
+  "v21_conservative.py",
+  "v21_liqcap.py",
+  "v21_liqcap_build.py",
+  "v21_open_impact.py",
+  "run_open_capture.ps1",
+  "RESEARCH_conservative.md",
+  "RESEARCH_fill_friction_AB.md",
   "v20_features_cache.pkl"
 )
 
@@ -63,7 +70,7 @@ Write-Host ""
 Write-Host "Review the list above. Press ENTER to commit & push  (Ctrl+C to abort)."
 Read-Host | Out-Null
 
-git commit -m "v20+v21: gmc gap-fade leg into v13_target; v21 lifts S3 to annual +270% / MDD -4.3% / win 78% (gap_max + zt_min filters)"
+git commit -m "v21: conservative open-volume cap (10pct of real 09:01) into v13_target default sizing; v21_report defaults conservative +147pct / MDD -4.40pct, --aggressive keeps old +158pct; add v21_conservative full floor +128pct"
 
 Write-Host ""
 Write-Host "Pushing to origin/master ..."
