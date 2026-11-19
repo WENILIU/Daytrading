@@ -33,8 +33,8 @@ def at(hh, mm):
         G.datetime = real
 
 
-cases = [(13, 37, False), (13, 26, False), (8, 54, False),
-         (8, 55, True), (8, 58, True), (9, 0, True), (13, 20, True), (13, 25, True)]
+cases = [(13, 37, False), (13, 26, False), (8, 44, False),
+         (8, 45, True), (8, 58, True), (9, 0, True), (13, 20, True), (13, 25, True)]
 ok = True
 for hh, mm, should_pass in cases:
     got = at(hh, mm)

@@ -4161,7 +4161,13 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         """Refuse to run outside the session: a night run would scan today's stale
         opening prices, get every order rejected, and report a misleading verdict."""
         now = datetime.now()
-        start = now.replace(hour=8, minute=55, second=0, microsecond=0)
+        # The start has to match morning_chain.PAPER_FIRST. It is 08:45 now on both
+        # sides: on 2026-11-12, 11-16 and 11-17 the 08:55 chain drifted past 09:00
+        # and the opening-slippage gate could never be measured, so the launch moved
+        # earlier - and the trader refused it (measured 2026-11-19 08:51:19,
+        # "outside 08:55-13:25"). The end stays 13:25: after the force-clear there is
+        # nothing left to observe.
+        start = now.replace(hour=8, minute=45, second=0, microsecond=0)
         # 13:25, not 13:40. A process started after the force-clear has nothing
         # left to observe, and the broker still answers its orders with code 0
         # after the close without checking the day-trade qualification - so an
@@ -4170,7 +4176,7 @@ class GapFadePaperTrader(GapFadeAutoTrader):
         stop = now.replace(hour=13, minute=25, second=0, microsecond=0)
         if not (start <= now <= stop):
             print("PAPER MODE needs the live session. Current time "
-                  f"{now:%H:%M:%S} is outside 08:55-13:25.")
+                  f"{now:%H:%M:%S} is outside 08:45-13:25.")
             print("Run it on a trading day before 09:00 (it waits for the open),")
             print("or use `python gap_fade_auto.py scan` to test the feed only.")
             return 0
