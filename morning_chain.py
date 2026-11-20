@@ -199,6 +199,20 @@ def main():
             if bad:
                 verdict, why = "BLOCKED", "a gate failed: " + ", ".join(bad)
 
+    # The schedule has now been delivered late twice in a row (2026-11-19 at 08:47,
+    # 2026-11-20 at 09:04). Starting after 09:00 makes the only opening number the day
+    # can produce - first price read versus 09:00 - unmeasurable (LIVE_READINESS 11.15),
+    # and the paper guard refuses before 08:45, so either way the day is lost. When every
+    # gate is green and only the clock is wrong, wait for the window instead of deciding
+    # the day early or late. The wait is capped at 20 minutes.
+    if verdict is None and not a.no_launch:
+        opens = now.replace(hour=int(PAPER_FIRST[:2]), minute=int(PAPER_FIRST[3:5]), second=0, microsecond=0)
+        if now < opens:
+            nap = min((opens - now).total_seconds() + 5, 1200)
+            print("  gates are green at " + now.strftime("%H:%M:%S") + " but the paper window opens at " + PAPER_FIRST + "; sleeping " + str(int(nap)) + "s so paper starts before the open instead of late.", flush=True)
+            time.sleep(nap)
+            now = datetime.now()
+            print("  resumed at " + now.strftime("%H:%M:%S") + ", continuing into the window check.", flush=True)
     if verdict is None:
         late = now.strftime("%H:%M") > "09:00"
         window = PAPER_FIRST <= now.strftime("%H:%M") <= PAPER_LAST
