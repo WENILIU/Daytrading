@@ -206,6 +206,9 @@ def main():
     # gate is green and only the clock is wrong, wait for the window instead of deciding
     # the day early or late. The wait is capped at 20 minutes.
     if verdict is None and not a.no_launch:
+        # re-read the clock here: now was captured before the gates ran,
+        # so the nap would otherwise overshoot by however long the panels took.
+        now = datetime.now()
         opens = now.replace(hour=int(PAPER_FIRST[:2]), minute=int(PAPER_FIRST[3:5]), second=0, microsecond=0)
         if now < opens:
             nap = min((opens - now).total_seconds() + 5, 1200)
